@@ -6,7 +6,6 @@ fn main() {
   let word = read_line();
 
 
-
   println!("El login es: {}", word);
   // println!("Hello, world!");
 }
