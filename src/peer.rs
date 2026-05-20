@@ -186,15 +186,7 @@ async fn run_peer_session(
 
     // Notify local TUI
     {
-        let connected_msg = ChatMessage {
-            peer_id,
-            text: format!("connected {peer_id}"),
-            timestamp: 0,
-            flags: FLAG_REAL,
-        };
-        let _ = session_mgr
-            .message_tx
-            .try_send((peer_id, connected_msg));
+        session_mgr.system_msg(&format!("connected {peer_id}"));
     }
 
     // If initiator → request peer list from this peer
@@ -405,15 +397,7 @@ async fn run_peer_session(
     session_mgr.remove_session(&peer_id);
 
     {
-        let disconnected_msg = ChatMessage {
-            peer_id,
-            text: format!("disconnected {peer_id}"),
-            timestamp: 0,
-            flags: FLAG_REAL,
-        };
-        let _ = session_mgr
-            .message_tx
-            .try_send((peer_id, disconnected_msg));
+        session_mgr.system_msg(&format!("disconnected {peer_id}"));
     }
 
     Ok(())
