@@ -878,13 +878,351 @@ FASE 3 — OFUSCACIÓN + ANTI-COERCIÓN
   [ ] mlock() integration en crypto.rs
 
 FASE 4 — GRUPO + MULTI-SESIÓN
-  [ ] session.rs: N sesiones simultáneas
-  [ ] peer.rs: conectar a múltiples peers
-  [ ] broadcast de mensaje al grupo
-  [ ] propagación de IPs entre peers
+  [x] session.rs: N sesiones simultáneas
+  [x] peer.rs: conectar a múltiples peers
+  [x] broadcast de mensaje al grupo
+  [x] propagación de IPs entre peers
 
 FASE 5 — ENDURECIMIENTO
   [ ] pruebas de seguridad (escenarios de ataque)
   [ ] manejo de errores + reintentos
   [ ] edge cases: peer duplicado, reconexión, timeout
+```
+
+---
+
+## 16. Fase 4 — Especificación de Implementación
+
+### Principios
+
+- **Malla completa:** cada par de peers tiene su propio Double Ratchet independiente
+- **Sin relay ni servidor central:** mesh P2P puro
+- **Peer discovery dinámico (Opción A):** al conectar a un peer, pedís la lista del grupo
+- **Reconexión condicional:** solo si el grupo sigue vivo (≥2 peers restantes al remover)
+- **Identidad efímera:** si quedás solo (peer_count == 0), regenerás certs y arrancás de cero
+- **Sin rate limits:** todo viaja cifrado por el ratchet, no hay vectores de ataque reales
+
+### Constantes de mensaje (`types.rs`)
+
+```
+FLAG_REAL: u8 = 0             — mensaje de chat normal
+FLAG_DUMMY: u8 = 1            — tráfico dummy (descartar)
+FLAG_PEER_LIST_REQ: u8 = 2    — solicitar lista de peers
+FLAG_PEER_LIST_RES: u8 = 3    — respuesta con lista de peers
+FLAG_SYSTEM_JOIN: u8 = 4      — broadcast: alguien se unió
+FLAG_SYSTEM_LEAVE: u8 = 5     — broadcast: alguien se fue
+FLAG_SYSTEM_ALONE: u8 = 6     — el grupo quedó vacío, regenerar identidad
+```
+
+### Peer discovery — Flujo
+
+```
+NUEVO PEER X conecta a PEER A (primer --peer conocido):
+  1. X ↔ A: TLS + auth + ratchet → sesión
+  2. session_mgr registra a X, broadcast JOIN a otros (flags=4)
+  3. X (initiator) envía PEER_LIST_REQ (flags=2) cifrado por el ratchet
+  4. A recibe flags=2:
+     - session_mgr.list_peer_addresses(exclude: &peer_id)
+     - responde con PEER_LIST_RES (flags=3), body: JSON(Vec<PeerAddr>)
+  5. X recibe flags=3:
+     - Deserializa Vec<PeerAddr>
+     - Para cada addr: si no es self y no está conectada →
+       envía a discovery_channel (mpsc::UnboundedSender<PeerAddr>)
+  6. Main recibe de discovery_rx → spawn(connect_peer(addr))
+  7. X conecta a B, C, D en paralelo con sesiones independientes
+```
+
+### Reconexión condicional
+
+```
+remove_session(&peer_id) decide:
+  peer_count después de remover ≥ 2:
+    → guardar addr en known_peers (HashMap<PeerId, PeerAddr>)
+    → main reconnection loop (cada 30s) intenta reconectar
+
+  peer_count == 0:
+    → clear known_peers
+    → mandar FLAG_SYSTEM_ALONE por message_tx
+    → main recibe: regenerar certs → nuevo acceptor + connector → clear TUI
+```
+
+### Timeout de inactividad
+
+- Default: 300 segundos (5 min), configurable via `--inactivity-timeout`
+- `spawn_timeout_checker()`: task background que cada 30s revisa `last_message`
+- Si `Instant::now() - last_message > inactivity_timeout` → `remove_session()`
+- El peer loop detecta sender cerrado (msg_rx.recv() → None) → break → cleanup
+
+### TUI — Panel de peers
+
+```
+Layout horizontal:
+  ┌──────────────────────┬──────────────────┐
+  │      CHAT (75%)      │  PEERS (25%)     │
+  │                      │  a1b2c3d4        │
+  │  mensajes...         │  10.0.0.5:9000   │
+  │                      │                  │
+  │                      │  f6e7d8c9        │
+  │                      │  10.0.0.7:9000   │
+  │                      │                  │
+  │                      │  2/10 peers      │
+  ├──────────────────────┴──────────────────┤
+  │  Message: [______________________]      │
+  └─────────────────────────────────────────┘
+```
+
+System messages (JOIN/LEAVE) se muestran en gris itálico con prefijo `◆`.
+
+### Cambios por archivo
+
+| Archivo | Cambios |
+|---------|---------|
+| `types.rs` | FLAG_* constants, `PartialEq + Serialize + Deserialize` en PeerAddr |
+| `session.rs` | `inactivity_timeout`, `known_peers`, `discovery_tx`, `spawn_timeout_checker()`, `list_peer_addresses()`, `is_connected_to_addr()`, `update_last_message()`, `broadcast_except()`, remove_session con lógica de grupo |
+| `peer.rs` | `connect_peer()`, `connect_peers()`, manejo de flags 2-5 en loop, broadcast JOIN/LEAVE, discovery channel |
+| `main.rs` | `--inactivity-timeout`, discovery channel, reconnection loop, identity regeneration en FLAG_SYSTEM_ALONE |
+| `tui.rs` | Layout horizontal, `render_peer_list()`, `render_mode_indicator()`, system messages gris itálico, `Vec<(PeerId, String, u8)>` |
+
+---
+
+## 17. Fase 5 — Endurecimiento: Especificación
+
+### Principios
+
+- Solo hardening real — sin features nuevos
+- No se toca criptografía (TLS + E2EE se mantienen intactos)
+- No se agrega persistencia ni identidad global
+- Prioridad: evitar DoS, pánicos en cascada, tareas fantasma
+
+### Task 1 — Límite de tamaño en `read_frame`
+
+**Archivo:** `src/protocol.rs`
+
+**Problema:** `read_frame` lee `u32` (4GB) y hace `vec![0u8; frame_len]`. Atacante envía `0xFFFFFFFF` → OOM.
+
+**Solución:**
+```rust
+pub const MAX_FRAME_SIZE: usize = 1024 * 1024 * 10; // 10MB
+
+pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let frame_len = u32::from_be_bytes(len_buf) as usize;
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
+    }
+    let mut buf = vec![0u8; frame_len];
+    reader.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+```
+
+---
+
+### Task 2 — Mutex poisoning: `unwrap()` → `expect()`
+
+**Archivos:** `src/session.rs`, `src/main.rs`, `src/tui.rs`
+
+**Problema:** ~35 `lock().unwrap()` en todo el codebase. Un solo pánico envenena el Mutex y todos los `unwrap()` posteriores paniquean en cascada.
+
+**Solución:** Reemplazar cada `lock().unwrap()` con `lock().expect("contexto descriptivo")` en:
+- `session.rs`: ~20 ocurrencias en métodos de SessionManager
+- `main.rs`: `shared_acceptor`, `shared_connector` (~5 ocurrencias)
+- `tui.rs`: `panic_handler` (2 ocurrencias)
+
+---
+
+### Task 3 — F12: watch channel para matar peer tasks
+
+**Archivo:** `src/session.rs`
+
+**Problema:** F12 llama `clear_sessions()` que limpia el HashMap, pero las spawned tasks de cada conexión **siguen corriendo** procesando datos de red para siempre.
+
+**Solución:**
+
+```rust
+pub struct SessionManager {
+    // ... campos existentes ...
+    cancel_tx: tokio::sync::watch::Sender<bool>,
+}
+```
+
+- Cada peer task recibe un `cancel_rx: watch::Receiver<bool>` al registrarse
+- En el `tokio::select!` del peer loop, se agrega:
+  ```rust
+  _ = cancel_rx.changed() => {
+      if *cancel_rx.borrow() { break; }
+  }
+  ```
+- `clear_sessions()` setea la watch a `true`:
+  ```rust
+  pub fn clear_sessions(&self) {
+      let _ = self.cancel_tx.send(true);
+      self.sessions.lock().unwrap().clear();
+  }
+  ```
+- Al registrar un nuevo peer post-F12, la watch está en `true` → la tarea nueva se cancela inmediatamente
+
+---
+
+### Task 4 — Protección contra self-connection
+
+**Archivo:** `src/session.rs`, `src/peer.rs`
+
+**Problema:** `my_listen_addr` es `0.0.0.0:port`. No matchea `127.0.0.1:port` ni la IP pública. Un peer puede conectarse a sí mismo.
+
+**Solución:** `register_session` recibe `my_peer_id: &PeerId` y lo compara con el peer_id que intenta conectarse:
+
+```rust
+pub fn register_session(
+    &self,
+    handle: SessionHandle,
+    my_peer_id: &PeerId,
+) -> Result<(), &'static str> {
+    if handle.peer_id == *my_peer_id {
+        return Err("cannot connect to self");
+    }
+    if sessions.contains_key(&handle.peer_id) {
+        return Err("duplicate session");
+    }
+    // ... límites existentes ...
+}
+```
+
+---
+
+### Task 5 — Sesión duplicada + TCP simultáneo
+
+**Archivo:** `src/session.rs`
+
+**Problema:** `HashMap::insert` sobrescribe silenciosamente. Si ambos peers conectan simultáneamente, la segunda conexión mata la primera.
+
+**Solución:** Check explícito en `register_session` (junto con self-connection en Task 4):
+
+```rust
+if sessions.contains_key(&handle.peer_id) {
+    return Err("duplicate session");
+}
+```
+
+Regla: el que ya está conectado se queda. El que intenta conectar segundo recibe error y su loop se dropea.
+
+---
+
+### Task 6 — Límite en deserialización JSON
+
+**Archivo:** `src/peer.rs`
+
+**Problema:** `serde_json::from_slice(&plaintext)` y `serde_json::from_str(&msg.text)` sin límite de tamaño. Atacante puede enviar JSON gigante.
+
+**Solución:**
+
+```rust
+const MAX_JSON_SIZE: usize = 1024 * 64; // 64KB
+
+// Antes de deserializar
+if plaintext.len() > MAX_JSON_SIZE {
+    eprintln!("[peer] oversized json from {peer_id}, dropping");
+    continue;
+}
+```
+
+Aplica a los dos puntos de deserialización:
+1. `serde_json::from_slice(&plaintext)` para ChatMessage (line ~308)
+2. `serde_json::from_str(&msg.text)` para Vec<PeerAddr> (line ~342)
+
+---
+
+### Task 7 — Canales bounded con backpressure
+
+**Archivo:** `src/main.rs`, `src/peer.rs`, `src/session.rs`
+
+**Problema:** 4 canales `unbounded_channel` sin backpressure. Si el receptor se atora, la memoria crece sin límite.
+
+**Solución:**
+
+| Canal | Tipo actual | Nuevo tipo | Estrategia |
+|-------|------------|------------|------------|
+| Mensajes TUI (`msg_tx` → `msg_rx`) | `unbounded` | `channel(1024)` | Sliding window: `try_send()` → si lleno, dropear el más viejo |
+| Descubrimiento (`discovery_tx` → `discovery_rx`) | `unbounded` | `channel(256)` | `try_send()` → si lleno, ignorar |
+| Escritura por peer (`msg_tx` → `msg_rx` por peer) | `unbounded` | `channel(256)` | Backpressure natural: `send().await` bloquea hasta que la red consuma |
+| Eventos TUI (`event_tx` → `event_rx`) | `unbounded` | `unbounded` | Sin cambios (no queremos perder input del usuario) |
+
+Para sliding window en TUI:
+```rust
+match msg_tx.try_send((peer_id, msg)) {
+    Ok(_) => {}
+    Err(mpsc::error::TrySendError::Full(_)) => {
+        // Canal lleno, el TUI está saturado — dropear mensaje más viejo
+        // No hacemos nada, el mensaje se pierde (el nuevo no entra)
+    }
+    Err(mpsc::error::TrySendError::Closed(_)) => {}
+}
+```
+
+---
+
+### Task 8 — Task supervisión: JoinHandle + catch_unwind
+
+**Archivo:** `src/main.rs`
+
+**Problema:** Todos los `tokio::spawn` son fire-and-forget. Si una tarea paniquea, la funcionalidad se pierde para siempre.
+
+**Solución:**
+
+```rust
+pub struct TaskSupervisor {
+    pub listener_handle: Option<JoinHandle<()>>,
+    pub reconnection_handle: Option<JoinHandle<()>>,
+    pub timeout_handle: Option<JoinHandle<()>>,
+}
+```
+
+- Almacenar `JoinHandle` para las tareas críticas (listener, reconnection loop, timeout checker)
+- Envolver cada una en un helper que loguee el panic:
+  ```rust
+  fn spawn_supervised<F>(f: F, name: &'static str) -> JoinHandle<()>
+  where F: Future<Output = ()> + Send + 'static
+  {
+      tokio::spawn(async move {
+          if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).await {
+              eprintln!("[sesame] task '{name}' panicked: {panic:?}");
+          }
+      })
+  }
+  ```
+
+**Qué tareas se supervisan:**
+- Listener loop (aceptar conexiones entrantes)
+- Reconnection loop (reconexión cada 30s)
+- Timeout checker (inactividad)
+- Peer connections individuales (se almacenan en SessionManager para cancelación en F12)
+
+---
+
+### Resumen de cambios por archivo
+
+| Archivo | Cambios |
+|---------|---------|
+| `protocol.rs` | `MAX_FRAME_SIZE`, validación en `read_frame` |
+| `session.rs` | `expect()` en locks, `cancel_tx` watch channel, `register_session` con `my_peer_id` + duplicate check, `clear_sessions()` envía cancel |
+| `peer.rs` | Watch channel en `select!`, límite JSON en deserialización, pasar `my_peer_id` a `register_session` |
+| `main.rs` | `expect()` en locks, canales bounded, `TaskSupervisor`, `catch_unwind` en tareas críticas, pasar `my_peer_id` a `connect_peer` |
+
+### Roadmap actualizado
+
+```
+FASE 1 — NÚCLEO                  [x]
+FASE 2 — TUI                     [x]
+FASE 3 — OFUSCACIÓN + ANTI-COERCIÓN [x]
+FASE 4 — GRUPO + MULTI-SESIÓN    [x]
+FASE 5 — ENDURECIMIENTO
+  [x] Task 1: read_frame max size
+  [x] Task 2: Mutex poisoning handler
+  [x] Task 3: F12 watch channel
+  [x] Task 4: Self-connection
+  [x] Task 5: Sesión duplicada
+  [x] Task 6: Límite JSON
+  [x] Task 7: Canales bounded
+  [x] Task 8: Task supervisión
 ```
