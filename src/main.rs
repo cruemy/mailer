@@ -128,13 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         my_id,
     ));
 
-    let panic_handler = Arc::new(std::sync::Mutex::new(PanicHandler::new(
-        session_mgr.clone(),
-        phrase.clone(),
-        decoy_phrase.clone(),
-        peers.clone(),
-        start_decoy,
-    )));
+    let panic_handler = Arc::new(std::sync::Mutex::new(PanicHandler::new(start_decoy)));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{listen_port}")).await?;
 

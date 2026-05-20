@@ -183,10 +183,6 @@ impl SessionManager {
         self.phrase.lock().expect("phrase poisoned").clone()
     }
 
-    pub fn switch_phrase(&self, new_phrase: &str) {
-        *self.phrase.lock().expect("phrase poisoned") = new_phrase.to_string();
-    }
-
     pub fn known_peers_list(&self) -> Vec<PeerAddr> {
         self.known_peers
             .lock()

@@ -80,11 +80,7 @@ impl TuiState {
                     self.quit = true;
                 }
                 KeyCode::F(12) => {
-                    {
-                        let mut ph = self.panic_handler.lock().expect("panic_handler poisoned");
-                        ph.toggle_mode();
-                    }
-                    self.clear_messages();
+                    self.quit = true;
                 }
                 _ => {}
             },
