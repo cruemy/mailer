@@ -396,9 +396,8 @@ async fn run_peer_session(
 
     session_mgr.remove_session(&peer_id);
 
-    {
-        session_mgr.system_msg(&format!("disconnected {peer_id}"));
-    }
-
     Ok(())
+
+    // "disconnected" is not sent here — remove_session handles
+    // SYSTEM_ALONE broadcast if no peers remain
 }
