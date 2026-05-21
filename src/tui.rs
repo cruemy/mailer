@@ -4,6 +4,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
@@ -119,6 +120,7 @@ impl TuiState {
 
     fn render_chat(&self, frame: &mut Frame, area: Rect, panic_mode: bool) {
         let peer_count = self.session_mgr.peer_count();
+        let max_width = area.width.saturating_sub(3) as usize;
 
         let items: Vec<ListItem> = self
             .messages
@@ -142,7 +144,12 @@ impl TuiState {
                         (format!(" {short} "), Style::default().fg(Color::Green))
                     }
                 };
-                ListItem::new(format!("[{prefix}] {text}")).style(style)
+                let formatted = format!("[{prefix}] {text}");
+                let lines: Vec<Line> = wrap_text(&formatted, max_width)
+                    .into_iter()
+                    .map(Line::from)
+                    .collect();
+                ListItem::new(Text::from(lines)).style(style)
             })
             .collect();
 
@@ -197,6 +204,33 @@ impl TuiState {
             .block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(list, area);
     }
+}
+
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if text.len() <= max_width || max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        if !current.is_empty() {
+            if current.len() + 1 + word.len() > max_width {
+                lines.push(current);
+                current = String::new();
+            } else {
+                current.push(' ');
+            }
+        }
+        current.push_str(word);
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    lines
 }
 
 pub fn spawn_event_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> {
