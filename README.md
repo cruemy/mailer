@@ -94,7 +94,26 @@ For automatic reconnection when anyone disconnects, have every peer point to eac
 cargo run --release -- --peer 192.168.1.99:9000 --peer 192.168.1.77:9000 --phrase "secret"
 ```
 
-See [USAGE.md](docs/USAGE.md) for detailed scenarios and CLI reference.
+See [USAGE.md](docs/USAGE.md) for detailed scenarios, CLI reference, and session management (Esc / F12 / disconnection behavior).
+
+## UI Controls
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message |
+| `Esc` | Clean exit — sends GOODBYE to peers, they stop reconnecting. On 1:1 / 1→N, receiver also closes |
+| `F12` | Panic — regenerates TLS identity, clears all sessions and known peers. Process stays running with new identity |
+| `Page Up` / `Page Down` | Scroll chat history |
+
+## Display Name
+
+Set a persistent visible name with `--display-name "Name"`. Stored in the platform config directory (`~/.config/sesame/` or `%APPDATA%\sesame\`). Peers see your name instead of the raw PeerId.
+
+```bash
+sesame --phrase "secret" --display-name "Alice"
+```
+
+See [USAGE.md](docs/USAGE.md) for details.
 
 ## Windows Firewall
 

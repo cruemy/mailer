@@ -14,7 +14,7 @@ use crate::ratchet::{DoubleRatchet, ReceivedFrame};
 use crate::session::SessionManager;
 use crate::types::{
     ChatMessage, PeerAddr, PeerId, FLAG_DUMMY, FLAG_PEER_LIST_REQ, FLAG_PEER_LIST_RES,
-    FLAG_REAL, FLAG_SYSTEM_JOIN, FLAG_SYSTEM_LEAVE,
+    FLAG_REAL, FLAG_SYSTEM_DISPLAY_NAME, FLAG_SYSTEM_JOIN, FLAG_SYSTEM_LEAVE,
 };
 
 const MAX_JSON_SIZE: usize = 1024 * 64; // 64 KB
@@ -343,6 +343,9 @@ async fn run_peer_session(
     };
 
     if let Err(e) = session_mgr.register_session(session_handle) {
+        if e == "duplicate session" {
+            return Ok(());
+        }
         session_mgr.system_msg(&format!("session registration failed: {e}"));
         return Err(e.into());
     }
@@ -363,6 +366,21 @@ async fn run_peer_session(
     // Notify local TUI
     {
         session_mgr.system_msg(&format!("connected {peer_id}"));
+    }
+
+    // Send our display name
+    if let Some(name) = session_mgr.my_display_name() {
+        let dn_msg = ChatMessage {
+            peer_id: session_mgr.my_peer_id(),
+            text: name,
+            timestamp: 0,
+            flags: FLAG_SYSTEM_DISPLAY_NAME,
+        };
+        if let Ok(data) = serde_json::to_vec(&dn_msg) {
+            if let Some(sender) = session_mgr.get_sender(&peer_id) {
+                let _ = sender.try_send(data);
+            }
+        }
     }
 
     // If initiator → request peer list from this peer
@@ -471,6 +489,9 @@ async fn run_peer_session(
                         }
                     }
                     FLAG_SYSTEM_JOIN | FLAG_SYSTEM_LEAVE => {
+                        let _ = session_mgr.message_tx.try_send((peer_id, msg));
+                    }
+                    FLAG_SYSTEM_DISPLAY_NAME => {
                         let _ = session_mgr.message_tx.try_send((peer_id, msg));
                     }
                     FLAG_REAL => {

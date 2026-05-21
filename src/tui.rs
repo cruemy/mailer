@@ -5,7 +5,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::panic::PanicHandler;
@@ -46,15 +46,16 @@ impl TuiState {
     }
 
     pub fn add_message(&mut self, peer_id: PeerId, text: String, flags: u8) {
-        let was_at_bottom = self.auto_scroll
-            || self.scroll_offset >= self.messages.len().saturating_sub(5);
+        let near_bottom = self.messages.len() > 5
+            && self.scroll_offset >= self.messages.len().saturating_sub(5);
+        let was_at_bottom = self.auto_scroll || near_bottom;
         self.messages.push((peer_id, text, flags));
         while self.messages.len() > MAX_MESSAGES {
             self.messages.remove(0);
-            self.scroll_offset = self.scroll_offset.saturating_sub(1);
         }
         if was_at_bottom {
             self.auto_scroll = true;
+            self.scroll_offset = 0;
         }
     }
 
@@ -97,15 +98,12 @@ impl TuiState {
                 }
                 KeyCode::PageUp => {
                     self.auto_scroll = false;
-                    let jump = self.messages.len().saturating_sub(5);
-                    self.scroll_offset = self.scroll_offset.saturating_add(5).min(jump);
+                    self.scroll_offset = self.scroll_offset.saturating_add(5);
                 }
                 KeyCode::PageDown => {
-                    if self.scroll_offset <= 5 && !self.messages.is_empty() {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(5);
+                    if self.scroll_offset == 0 {
                         self.auto_scroll = true;
-                        self.scroll_offset = 0;
-                    } else {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(5);
                     }
                 }
                 _ => {}
@@ -141,10 +139,14 @@ impl TuiState {
         self.render_peer_list(frame, right_chunks[1]);
     }
 
+    fn peer_display_name(&self, peer_id: &PeerId) -> String {
+        self.session_mgr.get_display_name(peer_id)
+            .unwrap_or_else(|| peer_id.to_string())
+    }
+
     fn render_chat(&mut self, frame: &mut Frame, area: Rect, panic_mode: bool) {
         let peer_count = self.session_mgr.peer_count();
         let max_width = area.width.saturating_sub(3) as usize;
-        let visible_rows = area.height.saturating_sub(2) as usize;
 
         let items: Vec<ListItem> = self
             .messages
@@ -164,8 +166,8 @@ impl TuiState {
                         Style::default().fg(Color::Cyan),
                     ),
                     _ => {
-                        let short = peer_id.to_string();
-                        (format!(" {short} "), Style::default().fg(Color::Green))
+                        let name = self.peer_display_name(peer_id);
+                        (format!(" {name} "), Style::default().fg(Color::Green))
                     }
                 };
                 let formatted = format!("[{prefix}] {text}");
@@ -178,18 +180,18 @@ impl TuiState {
             .collect();
 
         if self.auto_scroll {
-            self.scroll_offset = (items.len()).saturating_sub(visible_rows);
+            self.scroll_offset = 0;
         }
-        let offset = self.scroll_offset.min(items.len().saturating_sub(1));
+        let end = items.len().saturating_sub(self.scroll_offset);
+        let start = end.saturating_sub(100);
+        let visible: Vec<ListItem> = items.into_iter().skip(start).take(end - start).collect();
 
         let mode_indicator = if panic_mode { " [PANIC]" } else { "" };
         let title = format!(" Chat — {peer_count} peers{mode_indicator} ");
-        let mut list_state = ListState::default();
-        *list_state.offset_mut() = offset;
-        let chat = List::new(items)
+        let chat = List::new(visible)
             .block(Block::default().borders(Borders::ALL).title(title))
             .style(Style::default());
-        frame.render_stateful_widget(chat, area, &mut list_state);
+        frame.render_widget(chat, area);
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {
@@ -222,9 +224,8 @@ impl TuiState {
         let items: Vec<ListItem> = sessions
             .iter()
             .map(|info| {
-                let short = info.peer_id.to_string();
-                let addr = &info.peer_addr;
-                ListItem::new(format!("{short}\n{}:{}", addr.ip, addr.port))
+                let name = self.peer_display_name(&info.peer_id);
+                ListItem::new(name)
                     .style(Style::default().fg(Color::Yellow))
             })
             .collect();
@@ -322,6 +323,7 @@ mod tests {
                 port: 19000,
             },
             my_id,
+            None,
         ));
         let panic_handler = Arc::new(std::sync::Mutex::new(PanicHandler::new(false)));
         let mut state = TuiState::new(my_id, session_mgr, panic_handler);

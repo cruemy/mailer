@@ -21,6 +21,7 @@ where
 }
 
 mod auth;
+mod config;
 mod crypto;
 mod obfuscate;
 mod os_hardening;
@@ -36,8 +37,8 @@ mod types;
 use panic::PanicHandler;
 use crypto::LockedBytes;
 use types::{
-    ChatMessage, PeerAddr, PeerId, FLAG_SYSTEM_ALONE, FLAG_SYSTEM_INFO, FLAG_SYSTEM_JOIN,
-    FLAG_SYSTEM_LEAVE,
+    ChatMessage, PeerAddr, PeerId, FLAG_SYSTEM_ALONE, FLAG_SYSTEM_DISPLAY_NAME,
+    FLAG_SYSTEM_GOODBYE, FLAG_SYSTEM_INFO, FLAG_SYSTEM_JOIN, FLAG_SYSTEM_LEAVE,
 };
 
 #[tokio::main]
@@ -50,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut start_decoy = false;
     let mut listen_port: u16 = 9000;
     let mut inactivity_timeout_secs: u64 = 300;
+    let mut cli_display_name: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -95,8 +97,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .parse()
                     .map_err(|_| "invalid timeout")?;
             }
+            "--display-name" => {
+                cli_display_name = Some(
+                    args.next().ok_or("missing value for --display-name")?,
+                );
+            }
             "--help" | "-h" => {
-                println!("Usage: sesame --peer IP:PORT [--peer IP:PORT ...] (--phrase \"frase\" | --phrase-fd FD) [--decoy-phrase \"señuelo\"] [--decoy] [--port 9000] [--inactivity-timeout 300]");
+                println!("Usage: sesame --peer IP:PORT [--peer IP:PORT ...] (--phrase \"frase\" | --phrase-fd FD) [--decoy-phrase \"señuelo\"] [--decoy] [--port 9000] [--inactivity-timeout 300] [--display-name \"Nombre\"]");
                 println!();
                 println!("Flags:");
                 println!("  --peer IP:PORT              Known peer to connect to (can be repeated)");
@@ -106,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  --decoy                     Start in decoy mode");
                 println!("  --port N                    Listen port (default: 9000)");
                 println!("  --inactivity-timeout N       Seconds before idle peer is dropped (default: 300)");
+                println!("  --display-name \"Name\"        Set or update your display name (persisted)");
                 println!("  --help, -h                  Show this help");
                 std::process::exit(0);
             }
@@ -117,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if phrase_bytes.is_empty() {
-        eprintln!("Usage: sesame --peer IP:PORT [--peer IP:PORT ...] (--phrase \"frase\" | --phrase-fd FD) [--decoy-phrase \"señuelo\"] [--decoy] [--port 9000] [--inactivity-timeout 300]");
+        eprintln!("Usage: sesame --peer IP:PORT [--peer IP:PORT ...] (--phrase \"frase\" | --phrase-fd FD) [--decoy-phrase \"señuelo\"] [--decoy] [--port 9000] [--inactivity-timeout 300] [--display-name \"Nombre\"]");
         std::process::exit(1);
     }
 
@@ -133,6 +141,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     phrase_bytes.zeroize();
     decoy_phrase_bytes.zeroize();
+
+    let display_name = if let Some(name) = cli_display_name {
+        config::set_display_name(&name).display_name
+    } else {
+        config::load_config().display_name
+    };
 
     let (certs, key) = tls::generate_cert()?;
     let my_id = PeerId::from_cert_der(certs[0].as_ref());
@@ -154,6 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(inactivity_timeout_secs),
         my_listen_addr,
         my_id,
+        display_name,
     ));
 
     let panic_handler = Arc::new(std::sync::Mutex::new(PanicHandler::new(start_decoy)));
@@ -209,10 +224,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let sm = session_mgr.clone();
         let sc = shared_connector.clone();
+        let mut cancel_rx = sm.cancel_rx();
         spawn_supervised(
             move || async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        _ = cancel_rx.changed() => {
+                            if *cancel_rx.borrow() {
+                                return;
+                            }
+                        }
+                    }
                     let addrs = sm.known_peers_list();
                     for addr in addrs {
                         if !sm.is_connected_to_addr(&addr) {
@@ -271,6 +294,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             break Ok(());
                         }
                         if tui_state.quit {
+                            if session_mgr.peer_count() > 0 {
+                                let goodbye = ChatMessage {
+                                    peer_id: my_id,
+                                    text: String::new(),
+                                    timestamp: 0,
+                                    flags: FLAG_SYSTEM_GOODBYE,
+                                };
+                                if let Ok(data) = serde_json::to_vec(&goodbye) {
+                                    session_mgr.broadcast(&data);
+                                }
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                            }
                             break Ok(());
                         }
                     }
@@ -315,6 +350,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             FLAG_SYSTEM_INFO => {
                                 tui_state.add_message(msg.peer_id, msg.text, msg.flags);
+                            }
+                            FLAG_SYSTEM_DISPLAY_NAME => {
+                                session_mgr.set_display_name(msg.peer_id, msg.text);
+                            }
+                            FLAG_SYSTEM_GOODBYE => {
+                                session_mgr.disconnect_peer(&msg.peer_id);
+                                let text = format!("{peer} disconnected", peer = msg.peer_id);
+                                tui_state.add_message(PeerId([0u8; 32]), text, FLAG_SYSTEM_INFO);
+                                if session_mgr.peer_count() == 0 {
+                                    tui_state.quit = true;
+                                }
                             }
                             FLAG_SYSTEM_JOIN | FLAG_SYSTEM_LEAVE => {
                                 tui_state.add_message(msg.peer_id, msg.text, msg.flags);

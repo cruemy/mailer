@@ -29,6 +29,8 @@ pub struct SessionManager {
     my_peer_id: Mutex<PeerId>,
     discovery_tx: Mutex<Option<mpsc::Sender<PeerAddr>>>,
     cancel_tx: watch::Sender<bool>,
+    display_names: Mutex<HashMap<PeerId, String>>,
+    my_display_name: Mutex<Option<String>>,
 }
 
 impl SessionManager {
@@ -38,6 +40,7 @@ impl SessionManager {
         inactivity_timeout: Duration,
         my_listen_addr: PeerAddr,
         my_peer_id: PeerId,
+        my_display_name: Option<String>,
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -51,6 +54,8 @@ impl SessionManager {
             my_peer_id: Mutex::new(my_peer_id),
             discovery_tx: Mutex::new(None),
             cancel_tx: watch::channel(false).0,
+            display_names: Mutex::new(HashMap::new()),
+            my_display_name: Mutex::new(my_display_name),
         }
     }
 
@@ -64,6 +69,18 @@ impl SessionManager {
 
     pub fn set_my_peer_id(&self, peer_id: PeerId) {
         *self.my_peer_id.lock().expect("my_peer_id poisoned") = peer_id;
+    }
+
+    pub fn my_display_name(&self) -> Option<String> {
+        self.my_display_name.lock().expect("my_display_name poisoned").clone()
+    }
+
+    pub fn set_display_name(&self, peer_id: PeerId, name: String) {
+        self.display_names.lock().expect("display_names poisoned").insert(peer_id, name);
+    }
+
+    pub fn get_display_name(&self, peer_id: &PeerId) -> Option<String> {
+        self.display_names.lock().expect("display_names poisoned").get(peer_id).cloned()
     }
 
     pub fn register_session(&self, handle: SessionHandle) -> Result<(), &'static str> {
@@ -109,6 +126,17 @@ impl SessionManager {
                 flags: FLAG_SYSTEM_INFO,
             };
             let _ = self.message_tx.try_send((*peer_id, msg));
+        }
+    }
+
+    pub fn disconnect_peer(&self, peer_id: &PeerId) {
+        let removed = {
+            let mut sessions = self.sessions.lock().expect("sessions poisoned");
+            sessions.remove(peer_id)
+        };
+        if let Some(handle) = removed {
+            handle.cancel_notify.notify_one();
+            self.known_peers.lock().expect("known_peers poisoned").remove(peer_id);
         }
     }
 

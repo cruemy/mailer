@@ -18,6 +18,8 @@ pub const FLAG_SYSTEM_JOIN: u8 = 4;
 pub const FLAG_SYSTEM_LEAVE: u8 = 5;
 pub const FLAG_SYSTEM_ALONE: u8 = 6;
 pub const FLAG_SYSTEM_INFO: u8 = 7;
+pub const FLAG_SYSTEM_GOODBYE: u8 = 8;
+pub const FLAG_SYSTEM_DISPLAY_NAME: u8 = 9;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub struct PeerId(pub [u8; 32]);

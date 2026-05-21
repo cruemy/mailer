@@ -8,7 +8,8 @@ cargo run -- --help
 
 ```
 Usage: sesame --peer IP:PORT [--peer IP:PORT ...] (--phrase "frase" | --phrase-fd FD)
-             [--decoy] [--port 9000] [--inactivity-timeout 300]
+              [--decoy] [--port 9000] [--inactivity-timeout 300]
+              [--display-name "Nombre"]
 
 Flags:
   --peer IP:PORT              Peer conocido al que conectarse (repetible)
@@ -17,13 +18,67 @@ Flags:
   --decoy                     Arrancar con frase señuelo (la app antepone "decoy-")
   --port N                    Puerto de escucha (default: 9000)
   --inactivity-timeout N      Segundos antes de dropear un peer inactivo (default: 300)
+  --display-name "Name"       Setear o actualizar tu nombre visible (se persiste)
   --help, -h                  Mostrar esta ayuda
 ```
 
 **Controles en la UI:**
 - `Enter` — enviar mensaje
-- `Esc` o `F12` — salir
+- `Esc` — salir (envía goodbye a peers conectados)
+- `F12` — pánico: regenera identidad, borra sesiones y known_peers (nuevo certificado TLS + nuevo PeerId)
+- `Re Pág` / `Av Pág` — desplazar historial
 - Escribir normalmente — ingresar texto
+
+---
+
+## Cierre de sesión
+
+### `Esc` — Cierre limpio
+
+Envía un mensaje `GOODBYE` a todos los peers conectados, espera 200ms para que se entregue, y termina el proceso.
+
+**Del otro lado:**
+- Recibe el goodbye → borra al emisor de `known_peers` (no intenta reconectarlo)
+- Si era el único peer (1:1 o 1→N) → también cierra la app automáticamente
+- Si hay más peers conectados (mesh) → solo muestra `[peer] disconnected` y sigue
+
+### `F12` — Pánico / Identity rotation
+
+**No envía goodbye.** En su lugar:
+1. Envía `FLAG_SYSTEM_ALONE` a todos los peers
+2. Genera un **nuevo certificado TLS** → nuevo PeerId
+3. Actualiza acceptor/connector con el nuevo certificado
+4. Borra todas las sesiones y `known_peers`
+5. El proceso sigue corriendo con identidad nueva
+
+**Del otro lado:**
+- Los peers rotan también su identidad
+- `known_peers` se limpia del lado que hizo F12
+- Es como arrancar de cero: los demás te ven como un peer nuevo
+
+### Matar el proceso (kill, taskkill, Ctrl+Break)
+
+Sin goodbye. El otro lado lo trata como caída de red → el loop de reconexión lo reintenta cada 5s. Para que deje de reconectar, el peer debe cerrar con `Esc` (si el receptor cierra, manda goodbye y el otro para de reconectar).
+
+---
+
+## Display name
+
+Podés elegir un nombre visible con `--display-name`. Se persiste en `~/.config/sesame/config.json` (Linux/macOS) o `%APPDATA%\sesame\config.json` (Windows). La próxima vez que arranques sin `--display-name`, se usa el guardado.
+
+```bash
+# Setear o actualizar
+sesame --phrase "secreto" --display-name "Sesame"
+
+# La próxima vez, el nombre persiste aunque no pases --display-name
+sesame --phrase "secreto"
+```
+
+El nombre se envía a los peers cuando te conectás, y se muestra en:
+- **Lista de peers**: en vez de la IP
+- **Chat**: como prefijo de cada mensaje (en vez del PeerId hex)
+
+Si no se ha seteado un display name, se muestra el PeerId corto como antes.
 
 ---
 
@@ -127,10 +182,12 @@ Usá la IP local (empieza con `192.168.`, `10.`, `172.16.`) — la que termina e
 
 | Escenario | Qué pasa |
 |---|---|
-| Se cae 1 peer, quedan ≥ 2 | Los demás peers reconectan automáticamente al caído |
-| Se cae 1 peer, queda 1 | El que quedó solo regenera identidad y espera nuevas conexiones |
-| 2 personas, se cae 1 | El que quedó solo regenera identidad |
+| Se cae 1 peer, quedan ≥ 2 | Los demás peers reconectan automáticamente al caído (cada 5s) |
+| Se cae 1 peer, queda 1, sin goodbye | El que quedó solo regenera identidad y espera nuevas conexiones |
+| 2 personas, se cae 1 sin goodbye | El que quedó solo regenera identidad |
 | Se cae la red completa | Cada uno queda solo, regenera identidad. Hay que volver a conectar con `--peer` |
+| Peer cierra con `Esc` | Envía goodbye → los demás lo borran de known_peers y no reconectan. Si era 1:1, el receptor también cierra |
+| Peer cierra con `F12` | Identity rotation. Todos los peers rotan su identidad, known_peers se limpia |
 
 **Regenerar identidad** significa nuevo certificado TLS + nuevo PeerId. Es como arrancar de cero — otros peers te ven como alguien nuevo cuando te reconectás.
 
