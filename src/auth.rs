@@ -54,11 +54,16 @@ pub async fn perform_handshake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     } else {
         (their_peer_id, our_peer_id)
     };
+    let (salt_a, salt_b) = if our_salt < their_salt {
+        (&our_salt[..], &their_salt[..])
+    } else {
+        (&their_salt[..], &our_salt[..])
+    };
     let session_key = LockedKey::new(sha256_many(&[
         &pake_key,
         tls_exporter,
-        &our_salt,
-        &their_salt,
+        salt_a,
+        salt_b,
         &peer_a.0,
         &peer_b.0,
     ]));
