@@ -142,10 +142,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     phrase_bytes.zeroize();
     decoy_phrase_bytes.zeroize();
 
-    let display_name = if let Some(name) = cli_display_name {
-        config::set_display_name(&name).display_name
+    let display_name = if let Some(ref name) = cli_display_name {
+        eprintln!("[sesame] setting display name to '{name}' at {}",
+            config::config_path().display());
+        config::set_display_name(name).display_name
     } else {
-        config::load_config().display_name
+        let cfg = config::load_config();
+        if let Some(ref name) = cfg.display_name {
+            eprintln!("[sesame] loaded display name '{name}' from {}",
+                config::config_path().display());
+        }
+        cfg.display_name
     };
 
     let (certs, key) = tls::generate_cert()?;

@@ -370,6 +370,7 @@ async fn run_peer_session(
 
     // Send our display name
     if let Some(name) = session_mgr.my_display_name() {
+        eprintln!("[sesame] sending display name '{name}' to {peer_id}");
         let dn_msg = ChatMessage {
             peer_id: session_mgr.my_peer_id(),
             text: name,

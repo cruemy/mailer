@@ -6,26 +6,46 @@ pub struct Config {
     pub display_name: Option<String>,
 }
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     let base = dirs::config_dir().expect("config directory not found");
     base.join("sesame").join("config.json")
 }
 
 pub fn load_config() -> Config {
     let path = config_path();
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|data| serde_json::from_str(&data).ok())
-        .unwrap_or_default()
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[sesame] config: could not read {}: {e}", path.display());
+            return Config::default();
+        }
+    };
+    match serde_json::from_str(&data) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[sesame] config: invalid JSON at {}: {e}", path.display());
+            Config::default()
+        }
+    }
 }
 
 pub fn save_config(config: &Config) {
     let path = config_path();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("[sesame] config: could not create {}: {e}", parent.display());
+            return;
+        }
     }
-    if let Ok(data) = serde_json::to_string_pretty(config) {
-        let _ = std::fs::write(&path, data);
+    let data = match serde_json::to_string_pretty(config) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[sesame] config: serialization error: {e}");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&path, &data) {
+        eprintln!("[sesame] config: could not write {}: {e}", path.display());
     }
 }
 
