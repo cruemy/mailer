@@ -14,7 +14,7 @@
 
 ## Security
 
-See [`SECURITY.md`](SECURITY.md) for the formal threat model, current guarantees, known production gaps, and operational requirements.
+See [`SECURITY.md`](docs/SECURITY.md) for the formal threat model, current guarantees, known production gaps, and operational requirements.
 
 - **TLS 1.3 mutual authentication** with self-signed Ed25519 certificates (generated at each startup, never persisted)
 - **Argon2id** for passphrase hashing (memory-hard, resistant to GPU/ASIC attacks)
@@ -94,7 +94,7 @@ For automatic reconnection when anyone disconnects, have every peer point to eac
 cargo run --release -- --peer 192.168.1.99:9000 --peer 192.168.1.77:9000 --phrase "secret"
 ```
 
-See [USAGE.md](USAGE.md) for detailed scenarios and CLI reference.
+See [USAGE.md](docs/USAGE.md) for detailed scenarios and CLI reference.
 
 ## Windows Firewall
 

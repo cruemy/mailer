@@ -1276,9 +1276,9 @@ FASE 6 — ASEGURAMIENTO MÁXIMO    [ ]
 
 ### Task 1 — Threat model formal + límites explícitos
 
-**Archivo:** `SECURITY.md`, `SESAME_PLAN.md`
+**Archivo:** `docs/SECURITY.md`, `plans/sesame-mvp-plan.md`
 
-**Estado:** Implementado en `SECURITY.md`. Mantener este archivo como fuente de verdad para garantías, límites, operación segura y criterios de producción.
+**Estado:** Implementado en `docs/SECURITY.md`. Mantener este archivo como fuente de verdad para garantías, límites, operación segura y criterios de producción.
 
 **Problema:** El plan promete muchas propiedades, pero no separa claramente qué está garantizado, qué depende del entorno y qué queda fuera de alcance.
 
@@ -1524,7 +1524,7 @@ AAD = frame_version || direction || peer_id_sender || peer_id_receiver || msg_nu
 
 **Archivos:** todo el core
 
-**Estado:** Preparado `AUDIT.md` con scope y preguntas obligatorias. La auditoría externa real no puede completarse dentro del repo; sigue siendo gate de producción.
+**Estado:** Preparado `docs/AUDIT.md` con scope y preguntas obligatorias. La auditoría externa real no puede completarse dentro del repo; sigue siendo gate de producción.
 
 **Problema:** Un protocolo propio con ratchet, PAKE, padding y panic mode no debe considerarse seguro solo por revisión interna.
 
@@ -1564,4 +1564,4 @@ La fase se considera completa solo si:
 - El handshake no permite validación offline práctica de frases humanas.
 - Los frames tienen AAD completo y rechazan replay/downgrade/wrong-peer.
 - F12 elimina sesiones, corta tareas, restaura terminal y termina proceso.
-- `SECURITY.md` documenta garantías, límites y operación segura del sistema.
+- `docs/SECURITY.md` documenta garantías, límites y operación segura del sistema.

@@ -109,7 +109,7 @@ Security-sensitive code must fail closed:
 
 Sesame can only claim production-ready security when all are true:
 
-- `SECURITY.md` and `SESAME_PLAN.md` agree on guarantees and limits;
+- `docs/SECURITY.md` and `plans/sesame-mvp-plan.md` agree on guarantees and limits;
 - PAKE replaces offline-verifiable phrase authentication;
 - phrase, session keys, ratchet chains, skipped keys, message keys, and DH private keys use locked/zeroized ownership or equivalent library guarantees;
 - TLS exporter and full transcript binding are enforced;
