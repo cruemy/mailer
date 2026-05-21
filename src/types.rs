@@ -62,6 +62,7 @@ impl std::fmt::Display for PeerAddr {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
 pub enum SessionState {
     Handshaking,
     Connected,
@@ -69,12 +70,14 @@ pub enum SessionState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
 pub enum PanicMode {
     Real,
     Decoy,
 }
 
 impl PanicMode {
+    #[allow(dead_code)]
     pub fn toggle(&self) -> Self {
         match self {
             PanicMode::Real => PanicMode::Decoy,
@@ -87,6 +90,8 @@ impl PanicMode {
 pub struct SessionInfo {
     pub peer_id: PeerId,
     pub peer_addr: PeerAddr,
+    #[allow(dead_code)]
     pub connected_since: Instant,
+    #[allow(dead_code)]
     pub last_message: Instant,
 }

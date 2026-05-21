@@ -7,12 +7,13 @@ cargo run -- --help
 ```
 
 ```
-Usage: sesame --peer IP:PORT [--peer IP:PORT ...] --phrase "frase"
+Usage: sesame --peer IP:PORT [--peer IP:PORT ...] (--phrase "frase" | --phrase-fd FD)
              [--decoy] [--port 9000] [--inactivity-timeout 300]
 
 Flags:
   --peer IP:PORT              Peer conocido al que conectarse (repetible)
   --phrase "frase"            Frase de autenticación
+  --phrase-fd FD              Leer frase desde file descriptor
   --decoy                     Arrancar con frase señuelo (la app antepone "decoy-")
   --port N                    Puerto de escucha (default: 9000)
   --inactivity-timeout N      Segundos antes de dropear un peer inactivo (default: 300)

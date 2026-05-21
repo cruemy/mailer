@@ -1,9 +1,91 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+use sha2::Digest;
+use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
-pub fn derive_key(phrase: &str, salt_a: &[u8; 32], salt_b: &[u8; 32]) -> Result<[u8; 32], String> {
+pub struct LockedBytes {
+    bytes: Box<[u8]>,
+}
+
+impl LockedBytes {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        let locked = Self {
+            bytes: bytes.into_boxed_slice(),
+        };
+        try_mlock(locked.as_bytes());
+        locked
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for LockedBytes {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+        try_munlock(self.as_bytes());
+    }
+}
+
+pub struct LockedKey {
+    bytes: Box<[u8; 32]>,
+}
+
+impl LockedKey {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        let key = Self {
+            bytes: Box::new(bytes),
+        };
+        try_mlock(key.as_bytes());
+        key
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.bytes
+    }
+
+    pub fn replace(&mut self, bytes: [u8; 32]) {
+        self.bytes.zeroize();
+        self.bytes.copy_from_slice(&bytes);
+        let mut new_bytes = bytes;
+        new_bytes.zeroize();
+        try_mlock(self.as_bytes());
+    }
+}
+
+impl Drop for LockedKey {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+        try_munlock(self.as_bytes());
+    }
+}
+
+pub struct LockedDhSecret {
+    bytes: LockedKey,
+}
+
+impl LockedDhSecret {
+    pub fn generate() -> Self {
+        Self {
+            bytes: LockedKey::new(generate_random_bytes::<32>()),
+        }
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        let secret = StaticSecret::from(*self.bytes.as_bytes());
+        PublicKey::from(&secret)
+    }
+
+    pub fn diffie_hellman(&self, peer: &PublicKey) -> LockedKey {
+        let secret = StaticSecret::from(*self.bytes.as_bytes());
+        LockedKey::new(secret.diffie_hellman(peer).to_bytes())
+    }
+}
+
+pub fn derive_key(phrase: &[u8], salt_a: &[u8; 32], salt_b: &[u8; 32]) -> Result<LockedKey, String> {
     let combined_salt = {
         let mut s = [0u8; 64];
         if salt_a < salt_b {
@@ -20,12 +102,10 @@ pub fn derive_key(phrase: &str, salt_a: &[u8; 32], salt_b: &[u8; 32]) -> Result<
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut output = [0u8; 32];
     argon2
-        .hash_password_into(phrase.as_bytes(), &combined_salt, &mut output)
+        .hash_password_into(phrase, &combined_salt, &mut output)
         .map_err(|e| e.to_string())?;
 
-    try_mlock(&output);
-
-    Ok(output)
+    Ok(LockedKey::new(output))
 }
 
 pub fn hkdf_derive(ikm: &[u8], info: &[u8]) -> [u8; 32] {
@@ -40,21 +120,12 @@ pub fn hkdf_expand_with_salt(salt: &[u8], ikm: &[u8], info: &[u8], output: &mut 
     hk.expand(info, output).expect("HKDF expand failed");
 }
 
-pub fn sha256(data: &[u8]) -> [u8; 32] {
-    Sha256::digest(data).into()
-}
-
-pub fn sha256_two(data1: &[u8], data2: &[u8]) -> [u8; 32] {
+pub fn sha256_many(parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(data1);
-    hasher.update(data2);
-    hasher.finalize().into()
-}
-
-pub fn zeroize_key_material(keys: &mut [&mut [u8]]) {
-    for key in keys {
-        key.zeroize();
+    for part in parts {
+        hasher.update(part);
     }
+    hasher.finalize().into()
 }
 
 pub fn generate_random_bytes<const N: usize>() -> [u8; N] {

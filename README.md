@@ -14,6 +14,8 @@
 
 ## Security
 
+See [`SECURITY.md`](SECURITY.md) for the formal threat model, current guarantees, known production gaps, and operational requirements.
+
 - **TLS 1.3 mutual authentication** with self-signed Ed25519 certificates (generated at each startup, never persisted)
 - **Argon2id** for passphrase hashing (memory-hard, resistant to GPU/ASIC attacks)
 - **HKDF-SHA256** for key derivation
@@ -44,6 +46,12 @@ The binary will be at `target/release/sesame.exe` (Windows) or `target/release/s
 
 ```bash
 cargo run --release -- --phrase "your passphrase"
+```
+
+For safer local handling, prefer passing the phrase through a file descriptor when possible:
+
+```bash
+printf '%s' "your passphrase" | cargo run --release -- --phrase-fd 0
 ```
 
 ## Quick start

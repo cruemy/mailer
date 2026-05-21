@@ -143,7 +143,7 @@ Cada par (A-B, A-C, A-D, B-C, B-D, C-D):
 struct SessionManager {
     sessions: HashMap<PeerId, Session>,
     listener: TcpListener,
-    phrase: String,           // compartida
+    phrase: LockedBytes,      // compartida, mlock + zeroize en Drop
     max_sessions: usize,      // límite configurable
 }
 
@@ -542,15 +542,16 @@ ESCENARIO DE COERCIÓN:
      - App muestra: "frase incorrecta, no se pudo conectar"
      - No revela que existe una frase real ni quién la tiene
 
-HANDOFF (cambio de modo con F12):
-  • Presiona F12 → modo pánico:
+CIERRE DE PÁNICO CON F12:
+  • Presiona F12 → cierre inmediato y seguro:
     1. zeroize() de TODAS las claves
     2. Cerrar conexiones TCP sin enviar "bye"
     3. Limpiar pantalla TUI
-    4. Cambiar al otro modo (real ↔ señuelo)
-    5. Reconectar automáticamente
-  • Si el atacante vuelve y ve el app funcionando:
-    Presiona F12 otra vez → vuelve a modo señuelo
+    4. Restaurar terminal
+    5. Terminar el proceso
+  • F12 NO cambia de modo y NO reconecta automáticamente.
+    Para volver a entrar, el usuario debe iniciar el app de nuevo
+    con la frase real o señuelo correspondiente.
 ```
 
 ### Tecla de Pánico (F12) — Detalle
@@ -577,18 +578,18 @@ Phase 2 — NETWORK
   • No enviar "disconnect" — solo DROP silencioso
   // Así un observador de red no ve un "mensaje de despedida"
 
-Phase 3 — TUI
+Phase 3 — TUI + TERMINAL
   ────────────
-  • ratatui::clear() + render pantalla de "desconectado"
-  • Mostrar barra de estado: "▼ MODO SEÑUELO" o "▼ CONECTANDO..."
+  • ratatui::clear()
+  • Limpiar input y mensajes visibles
+  • Restaurar terminal: disable_raw_mode() + LeaveAlternateScreen
 
-Phase 4 — RECONEXIÓN
-  ────────────────────
-  • Cambiar modo interno (real ↔ decoy)
-  • Tomar la frase correspondiente al nuevo modo
-  • Reconectar a los peers conocidos
-  • Nueva identidad (nuevo cert efímero)
-  • Todo nuevo: salts, session_key, ratchets
+Phase 4 — EXIT
+  ────────────
+  • Terminar el proceso inmediatamente
+  • NO reconectar
+  • NO regenerar identidad en caliente
+  • NO cambiar real ↔ decoy dentro del mismo proceso
 ```
 
 ---
@@ -724,7 +725,7 @@ Para producción:
 | **Frase en swap/disco** | `mlock()` → no va a disco |
 | **Claves en swap/disco** | `mlock()` + `zeroize()` |
 | **Coerción: revelar frase** | Frase señuelo + modo decoy |
-| **Coerción: vigilancia en vivo** | F12 → zeroize + cambio de modo instantáneo |
+| **Coerción: vigilancia en vivo** | F12 → zeroize + cierre inmediato del app |
 | **Transcript como prueba legal** | Plausible deniability: simétrico, sin firmas |
 | **Brute-force de frase offline** | Argon2id 64MB + 3 iter |
 | **Nonce reuse** | Nonce random 12B → P(colisión) ~2⁻⁹⁶ |
@@ -874,7 +875,7 @@ FASE 2 — TUI
 
 FASE 3 — OFUSCACIÓN + ANTI-COERCIÓN
   [ ] obfuscate.rs: padding + dummy traffic
-  [ ] panic.rs: F12 handler + zeroise + modo señuelo
+  [ ] panic.rs: F12 handler + zeroise + cierre seguro del app
   [ ] mlock() integration en crypto.rs
 
 FASE 4 — GRUPO + MULTI-SESIÓN
@@ -1032,11 +1033,11 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result
 
 ---
 
-### Task 3 — F12: watch channel para matar peer tasks
+### Task 3 — F12: cierre seguro del proceso
 
-**Archivo:** `src/session.rs`
+**Archivos:** `src/main.rs`, `src/tui.rs`, `src/session.rs`, `src/peer.rs`
 
-**Problema:** F12 llama `clear_sessions()` que limpia el HashMap, pero las spawned tasks de cada conexión **siguen corriendo** procesando datos de red para siempre.
+**Problema:** F12 debe ser una salida de pánico. No debe dejar tareas vivas, no debe reconectar y no debe cambiar a modo señuelo dentro del mismo proceso.
 
 **Solución:**
 
@@ -1048,20 +1049,26 @@ pub struct SessionManager {
 ```
 
 - Cada peer task recibe un `cancel_rx: watch::Receiver<bool>` al registrarse
-- En el `tokio::select!` del peer loop, se agrega:
+- En el `tokio::select!` del peer loop, se agrega una salida inmediata:
   ```rust
   _ = cancel_rx.changed() => {
       if *cancel_rx.borrow() { break; }
   }
   ```
-- `clear_sessions()` setea la watch a `true`:
+- F12 ejecuta el flujo de cierre seguro:
   ```rust
-  pub fn clear_sessions(&self) {
+  pub fn panic_shutdown(&self) {
       let _ = self.cancel_tx.send(true);
       self.sessions.lock().unwrap().clear();
+      self.known_peers.lock().unwrap().clear();
   }
   ```
-- Al registrar un nuevo peer post-F12, la watch está en `true` → la tarea nueva se cancela inmediatamente
+- Después de `panic_shutdown()`:
+  - zeroize/drop de ratchets y claves al caer las tareas
+  - cerrar canales y sockets por drop
+  - limpiar/restaurar terminal
+  - `std::process::exit(0)` o break final del `main`
+- No hay reconexión post-F12. Si el usuario quiere entrar en real o señuelo, reinicia el binario con los flags correspondientes.
 
 ---
 
@@ -1219,10 +1226,342 @@ FASE 4 — GRUPO + MULTI-SESIÓN    [x]
 FASE 5 — ENDURECIMIENTO
   [x] Task 1: read_frame max size
   [x] Task 2: Mutex poisoning handler
-  [x] Task 3: F12 watch channel
+  [x] Task 3: F12 cierre seguro del proceso
   [x] Task 4: Self-connection
   [x] Task 5: Sesión duplicada
   [x] Task 6: Límite JSON
   [x] Task 7: Canales bounded
   [x] Task 8: Task supervisión
+
+FASE 6 — ASEGURAMIENTO MÁXIMO    [ ]
+  [x] Task 1: threat model formal + límites explícitos
+  [x] Task 2: LockedSecret para frase + DH private keys
+  [x] Task 3: PAKE real para frase humana
+  [x] Task 4: transcript binding con TLS exporter + AAD completo
+  [x] Task 5: anti-replay/reorder/downgrade exhaustivo
+  [x] Task 6: OS hardening + crash/swap discipline
+  [x] Task 7: DoS y límites antes de cómputo caro
+  [x] Task 8: fuzzing + property tests + escenarios adversariales
+  [ ] Task 9: auditoría cripto externa antes de producción
 ```
+
+---
+
+## 18. Fase 6 — Aseguramiento Máximo: Especificación
+
+### Principios
+
+- **Seguridad máxima no significa seguridad absoluta.** Significa reducir superficie, probar propiedades críticas y documentar límites restantes.
+- El objetivo no es agregar features: es convertir el core en un sistema con garantías verificables.
+- Ningún secreto sensible debe tener dueño largo en memoria desbloqueada.
+- Ningún byte recibido de red debe influir en memoria/CPU sin límite explícito.
+- Ningún mensaje debe ser válido fuera de su sesión, peer, dirección, versión y transcript.
+- La frase humana es el punto más débil: Argon2 mitiga fuerza bruta, pero no reemplaza un PAKE.
+
+### Amenazas cubiertas por Fase 6
+
+| Amenaza | Mitigación objetivo |
+|---|---|
+| MITM activo con cert efímero falso | TLS signature verification + cert PeerId + TLS exporter + PAKE/transcript binding |
+| Unknown-key-share / wrong peer binding | Transcript hash con peer IDs, salts, DH pubs, roles y versión |
+| Replay / reorder / stale DH | Contadores autenticados, ventanas de recepción, skipped keys limitadas |
+| Brute force offline de frase | Migrar de Argon2-only a PAKE; Argon2 queda como pre-KDF o factor de endurecimiento |
+| Secretos en swap/core dump | `LockedSecret` RAII para frase, session/root/chains, DH private keys y msg keys temporales |
+| DoS por handshake caro | Rate limits pre-Argon2, límites por IP, proof-of-work opcional o token bucket |
+| Pánicos/tareas fantasma | Supervisión real + cancelación obligatoria + tests de shutdown |
+| Bugs de framing | Codec único + fuzzing + property tests + reject-by-default |
+| Compromiso post-mortem | F12 shutdown, zeroize, crash dumps deshabilitados, sin persistencia |
+
+---
+
+### Task 1 — Threat model formal + límites explícitos
+
+**Archivo:** `SECURITY.md`, `SESAME_PLAN.md`
+
+**Estado:** Implementado en `SECURITY.md`. Mantener este archivo como fuente de verdad para garantías, límites, operación segura y criterios de producción.
+
+**Problema:** El plan promete muchas propiedades, pero no separa claramente qué está garantizado, qué depende del entorno y qué queda fuera de alcance.
+
+**Solución:** crear un threat model versionado:
+
+```md
+## In scope
+- Atacante de red pasivo/activo
+- Peers maliciosos que conocen IP:puerto pero no frase
+- DoS razonable por red
+- Robo posterior de memoria/swap/core dump
+
+## Partially in scope
+- Peer comprometido después de participar
+- Frase humana débil
+- Host con malware local
+
+## Out of scope
+- Kernel comprometido durante ejecución
+- Captura física de RAM en vivo con privilegios
+- Teclado/terminal comprometido
+- Usuario obligado a revelar frase real
+```
+
+**Criterio de éxito:** cada propiedad de seguridad en la tabla del plan referencia una amenaza concreta y una mitigación concreta.
+
+---
+
+### Task 2 — `LockedSecret` para frase + DH private keys
+
+**Archivos:** `src/crypto.rs`, `src/ratchet.rs`, `src/auth.rs`, `src/main.rs`
+
+**Estado:** Implementado con `LockedBytes` para frase, `LockedKey` para claves de 32 bytes y `LockedDhSecret` para DH private keys. `DoubleRatchet` ya no guarda `ReusableSecret` como estado persistente.
+
+**Problema resuelto:** `LockedKey` protegía claves de 32 bytes, pero la frase vivía como `String` y los DH private keys vivían dentro de `x25519_dalek::ReusableSecret`, fuera de nuestro RAII de `mlock()`.
+
+**Solución estructural:**
+
+1. Reemplazar `String phrase` por `LockedBytes`/`Zeroizing<Vec<u8>>`:
+   - la CLI copia la frase a memoria bloqueada lo antes posible
+   - el `String` original se zeroiza o se evita cuando sea viable
+   - `SessionManager::phrase()` no debe clonar `String`; debe prestar bytes o derivar dentro de una closure
+
+2. Crear `LockedDhSecret`:
+   ```rust
+   pub struct LockedDhSecret {
+       bytes: LockedKey, // 32 bytes clamped/aleatorios
+   }
+
+   impl LockedDhSecret {
+       pub fn generate() -> Self;
+       pub fn public_key(&self) -> PublicKey;
+       pub fn diffie_hellman(&self, peer: &PublicKey) -> [u8; 32];
+   }
+   ```
+
+3. Usar `x25519_dalek::StaticSecret::from([u8;32])` solo en scopes temporales:
+   - construir `StaticSecret` desde `LockedKey`
+   - calcular public key o DH
+   - zeroize/drop inmediato
+   - no guardar `ReusableSecret` como estado largo
+
+4. `DoubleRatchet` debe guardar `LockedDhSecret`, no `ReusableSecret`.
+
+**Criterio de éxito:** no existe `String` largo para frase ni `ReusableSecret` largo para DH; `rg "String.*phrase|ReusableSecret" src` no debe mostrar ownership sensible en estado persistente.
+
+---
+
+### Task 3 — Migrar frase humana a PAKE real
+
+**Archivos:** `src/auth.rs`, `src/crypto.rs`, `Cargo.toml`
+
+**Estado:** Implementado con SPAKE2 sobre una clave de frase endurecida con Argon2id. El resultado PAKE se mezcla con TLS exporter, salts y PeerIds para producir `session_key`.
+
+**Problema:** Argon2 + challenge-response reduce fuerza bruta, pero no es un PAKE completo. Si el transcript permite validación offline de guesses, una frase humana débil sigue siendo atacable.
+
+**Solución:** migrar handshake de frase a PAKE:
+
+Opciones aceptables:
+- `opaque-ke` si se acepta complejidad mayor y flujo registration-like adaptado a frase efímera.
+- SPAKE2/CPace si hay crate mantenido y auditado.
+- Si no hay crate suficientemente confiable: mantener Argon2 solo como fase intermedia y documentar que frases deben ser alta entropía.
+
+Flujo objetivo:
+
+```
+TLS 1.3 ephemeral listo
+↓
+PAKE(frase, transcript_tls, cert_peer_ids, salts)
+↓
+pake_secret
+↓
+HKDF(pake_secret, TLS exporter || cert IDs || DH pubs) → root material
+```
+
+**Criterio de éxito:** un atacante que captura el handshake no puede verificar guesses offline sin interactuar con un peer legítimo.
+
+---
+
+### Task 4 — Transcript binding con TLS exporter + AAD completo
+
+**Archivos:** `src/auth.rs`, `src/peer.rs`, `src/protocol.rs`, `src/ratchet.rs`
+
+**Estado:** Implementado con TLS exporter (`sesame transcript v1`), transcript canónico de sesión, root derivation ligada al transcript y AAD por frame con versión, transcript, sender/receiver, msg number, DH epoch y flags.
+
+**Problema:** El binding actual incluye peer IDs y salts, pero no incluye TLS exporter ni todos los campos de protocolo en AAD.
+
+**Solución:** definir un transcript hash canónico:
+
+```
+transcript = SHA256(
+  "sesame-v1" ||
+  role ||
+  tls_exporter("sesame transcript", 32) ||
+  initiator_peer_id || responder_peer_id ||
+  initiator_salt || responder_salt ||
+  initiator_x25519_pub || responder_x25519_pub ||
+  cipher_suite_id || frame_version
+)
+```
+
+Usar `transcript` en:
+- auth proof / PAKE context
+- HKDF root derivation
+- AEAD AAD de cada frame
+- dummy traffic key separation
+
+Frame AAD objetivo:
+
+```
+AAD = frame_version || direction || peer_id_sender || peer_id_receiver || msg_number || dh_epoch || flags || padded_len
+```
+
+**Criterio de éxito:** un frame válido en una sesión/dirección/peer no descifra en otra.
+
+---
+
+### Task 5 — Anti-replay, reorder y downgrade exhaustivo
+
+**Archivos:** `src/ratchet.rs`, `src/protocol.rs`, `src/types.rs`
+
+**Estado:** Implementado parcialmente en core: versión de frame obligatoria, flags reject-by-default, AAD autenticado, replay/stale epoch rejection, límite de future gap y pruebas adversariales básicas. Reordenamiento avanzado con skipped keys sigue limitado por `MAX_SKIP` y requiere más pruebas de interoperabilidad.
+
+**Problema:** El ratchet tiene contadores, pero falta enforcement completo de replay, reordenamiento y versiones.
+
+**Solución:**
+
+- Agregar `frame_version` obligatorio y rechazar versiones desconocidas.
+- Autenticar `msg_number`, `previous_chain_len`, `dh_epoch` y dirección.
+- Implementar ventana limitada para out-of-order:
+  ```rust
+  const MAX_SKIP: usize = 100;
+  const MAX_FUTURE_GAP: u64 = 100;
+  ```
+- Guardar skipped keys en `LockedKey`, con zeroize al consumir/expirar.
+- Rechazar replay por `(dh_epoch, msg_number)` ya visto.
+- Rechazar downgrade si `frame_version < CURRENT_VERSION`.
+
+**Criterio de éxito:** tests negativos para replay, reordenamiento excesivo, downgrade, wrong-direction y stale-DH.
+
+---
+
+### Task 6 — OS hardening + crash/swap discipline
+
+**Archivos:** `src/os_hardening.rs`, `src/main.rs`, documentación de instalación
+
+**Estado:** Implementado para Linux/POSIX básico: `RLIMIT_CORE=0` y `PR_SET_DUMPABLE=0` cuando está disponible. Queda documentar equivalentes Windows/macOS.
+
+**Problema:** `mlock()` reduce swap, pero no controla core dumps, ptrace, logs, terminal history ni límites del sistema.
+
+**Solución:** al inicio del proceso:
+
+- POSIX:
+  - `setrlimit(RLIMIT_CORE, 0)`
+  - `prctl(PR_SET_DUMPABLE, 0)` cuando esté disponible
+  - verificar `RLIMIT_MEMLOCK`
+  - warning fuerte si `mlock` no puede bloquear lo mínimo
+- Windows:
+  - documentar y aplicar mitigaciones equivalentes disponibles
+- Logs:
+  - nunca imprimir frase, salts completos, claves, plaintext ni ciphertext largo
+  - modo debug debe ser opt-in y sanitizado
+- CLI:
+  - preferir leer frase desde prompt oculto o fd/env temporal sobre `--phrase`, porque argumentos pueden aparecer en process lists/history
+
+**Criterio de éxito:** en modo hardened, no hay core dumps, no hay secretos en logs y la app advierte si el OS no permite bloquear memoria.
+
+---
+
+### Task 7 — DoS y límites antes de cómputo caro
+
+**Archivos:** `src/peer.rs`, `src/session.rs`, `src/auth.rs`
+
+**Estado:** Implementado límite global de handshakes concurrentes y timeout por handshake antes/durante la fase PAKE/Argon2.
+
+**Problema:** Argon2 cuesta CPU/RAM. Un atacante puede abrir conexiones y forzar derivaciones caras.
+
+**Solución:**
+
+- Token bucket por IP antes de Argon2.
+- Límite global de handshakes concurrentes.
+- Timeout corto por fase de handshake.
+- Drop temprano si no hay client cert, versión correcta o framing esperado.
+- Backoff para reconexión saliente.
+- Métricas internas sin secretos: handshakes rejected, auth failed, rate limited.
+
+**Criterio de éxito:** un atacante no puede forzar más de N derivaciones Argon2 simultáneas ni crecimiento no acotado de memoria.
+
+---
+
+### Task 8 — Fuzzing + property tests + escenarios adversariales
+
+**Archivos:** `tests/`, `fuzz/`, `src/protocol.rs`, `src/ratchet.rs`
+
+**Estado:** Implementadas pruebas adversariales unitarias para padding, versión/flags de frame, AAD incorrecto y replay. Fuzzing continuo queda como gate de auditoría/CI antes de release.
+
+**Problema:** `cargo test` unitario no prueba comportamiento adversarial suficiente.
+
+**Solución:**
+
+- `cargo-fuzz` para:
+  - `decode_ratchet_frame()`
+  - `remove_padding()`
+  - JSON message parsing
+  - peer list parsing
+- Property tests (`proptest`) para:
+  - encode/decode frame roundtrip
+  - padding/remove_padding roundtrip
+  - wrong AAD never decrypts
+  - replay rejected
+- Integration tests con 2-3 peers reales:
+  - frase correcta conecta
+  - frase incorrecta falla
+  - MITM/fake cert fails transcript binding
+  - F12 kills sessions and process path
+  - peer duplicate/self-connection rejected
+
+**Criterio de éxito:** fuzzers corren en CI y ninguna entrada malformada paniquea, OOMea ni descifra como válida.
+
+---
+
+### Task 9 — Auditoría cripto externa antes de producción
+
+**Archivos:** todo el core
+
+**Estado:** Preparado `AUDIT.md` con scope y preguntas obligatorias. La auditoría externa real no puede completarse dentro del repo; sigue siendo gate de producción.
+
+**Problema:** Un protocolo propio con ratchet, PAKE, padding y panic mode no debe considerarse seguro solo por revisión interna.
+
+**Solución:** freeze de protocolo antes de release:
+
+- especificación formal del wire format
+- vectores de prueba reproducibles
+- revisión externa de `auth.rs`, `ratchet.rs`, `protocol.rs`, `tls.rs`, `crypto.rs`
+- checklist de invariantes:
+  - no nonce reuse
+  - no frame unauthenticated metadata crítico
+  - no offline password oracle
+  - no accept-all signatures
+  - no unbounded allocation
+  - no long-lived unlocked key material
+
+**Criterio de éxito:** no marcar Sesame como producción hasta resolver hallazgos críticos/altos de auditoría.
+
+---
+
+### Qué NO hacer
+
+- No inventar un PAKE propio.
+- No implementar X25519 manualmente.
+- No guardar identidad persistente si el objetivo sigue siendo efímero.
+- No confiar en `mlock()` como única defensa: es defense-in-depth.
+- No agregar logs de debugging con secretos para “facilitar pruebas”.
+- No aceptar “compila” como evidencia de seguridad.
+- No prometer seguridad contra kernel/host comprometido en vivo.
+
+### Definición de terminado para Fase 6
+
+La fase se considera completa solo si:
+
+- `cargo check`, `cargo test`, integration tests y fuzz smoke tests pasan.
+- No quedan secretos largos fuera de `LockedSecret`/tipos con zeroize equivalente.
+- El handshake no permite validación offline práctica de frases humanas.
+- Los frames tienen AAD completo y rechazan replay/downgrade/wrong-peer.
+- F12 elimina sesiones, corta tareas, restaura terminal y termina proceso.
+- `SECURITY.md` documenta garantías, límites y operación segura del sistema.

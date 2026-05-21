@@ -31,7 +31,9 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 
 pub fn apply_padding(payload: &[u8]) -> Vec<u8> {
     let payload_len = payload.len();
-    let total_padded = ((payload_len + PADDING_BLOCK - 1) / PADDING_BLOCK) * PADDING_BLOCK;
+    assert!(payload_len <= u16::MAX as usize, "payload too large for padding header");
+    let frame_len = payload_len + 2;
+    let total_padded = ((frame_len + PADDING_BLOCK - 1) / PADDING_BLOCK) * PADDING_BLOCK;
     let padded_len = std::cmp::max(PADDING_BLOCK, total_padded);
 
     let mut frame = Vec::with_capacity(padded_len);
@@ -57,4 +59,25 @@ pub fn remove_padding(frame: &[u8]) -> std::io::Result<&[u8]> {
         ));
     }
     Ok(&frame[2..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn padding_round_trips_varied_lengths() {
+        for len in [0, 1, 32, 1398, 1399, 1400, 4096] {
+            let payload = vec![7u8; len];
+            let padded = apply_padding(&payload);
+            assert_eq!(padded.len() % PADDING_BLOCK, 0);
+            assert_eq!(remove_padding(&padded).unwrap(), payload.as_slice());
+        }
+    }
+
+    #[test]
+    fn padding_rejects_truncated_payload() {
+        let frame = [0, 10, 1, 2, 3];
+        assert!(remove_padding(&frame).is_err());
+    }
 }

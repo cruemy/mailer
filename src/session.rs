@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
+use crate::crypto::LockedBytes;
 use crate::types::{ChatMessage, PeerAddr, PeerId, SessionInfo, FLAG_SYSTEM_ALONE, FLAG_SYSTEM_INFO};
 
 pub struct SessionHandle {
@@ -17,20 +18,21 @@ pub struct SessionHandle {
 
 pub struct SessionManager {
     sessions: Mutex<HashMap<PeerId, SessionHandle>>,
-    phrase: Mutex<String>,
+    phrase: LockedBytes,
     pub max_sessions: usize,
     pub same_ip_limit: usize,
     pub message_tx: mpsc::Sender<(PeerId, ChatMessage)>,
     pub inactivity_timeout: Duration,
     known_peers: Mutex<HashMap<PeerId, PeerAddr>>,
     pub my_listen_addr: PeerAddr,
-    pub my_peer_id: PeerId,
+    my_peer_id: Mutex<PeerId>,
     discovery_tx: Mutex<Option<mpsc::Sender<PeerAddr>>>,
+    cancel_tx: watch::Sender<bool>,
 }
 
 impl SessionManager {
     pub fn new(
-        phrase: String,
+        phrase: LockedBytes,
         message_tx: mpsc::Sender<(PeerId, ChatMessage)>,
         inactivity_timeout: Duration,
         my_listen_addr: PeerAddr,
@@ -38,20 +40,33 @@ impl SessionManager {
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
-            phrase: Mutex::new(phrase),
+            phrase,
             max_sessions: 10,
             same_ip_limit: 1,
             message_tx,
             inactivity_timeout,
             known_peers: Mutex::new(HashMap::new()),
             my_listen_addr,
-            my_peer_id,
+            my_peer_id: Mutex::new(my_peer_id),
             discovery_tx: Mutex::new(None),
+            cancel_tx: watch::channel(false).0,
         }
     }
 
+    pub fn cancel_rx(&self) -> watch::Receiver<bool> {
+        self.cancel_tx.subscribe()
+    }
+
+    pub fn my_peer_id(&self) -> PeerId {
+        *self.my_peer_id.lock().expect("my_peer_id poisoned")
+    }
+
+    pub fn set_my_peer_id(&self, peer_id: PeerId) {
+        *self.my_peer_id.lock().expect("my_peer_id poisoned") = peer_id;
+    }
+
     pub fn register_session(&self, handle: SessionHandle) -> Result<(), &'static str> {
-        if handle.peer_id == self.my_peer_id {
+        if handle.peer_id == self.my_peer_id() {
             return Err("cannot connect to self");
         }
 
@@ -105,15 +120,22 @@ impl SessionManager {
         self.known_peers.lock().expect("known_peers poisoned").clear();
         if had_sessions {
             let msg = ChatMessage {
-                peer_id: self.my_peer_id,
+                peer_id: self.my_peer_id(),
                 text: String::new(),
                 timestamp: 0,
                 flags: FLAG_SYSTEM_ALONE,
             };
-            let _ = self.message_tx.try_send((self.my_peer_id, msg));
+            let _ = self.message_tx.try_send((self.my_peer_id(), msg));
         }
     }
 
+    pub fn panic_shutdown(&self) {
+        let _ = self.cancel_tx.send(true);
+        self.sessions.lock().expect("sessions poisoned").clear();
+        self.known_peers.lock().expect("known_peers poisoned").clear();
+    }
+
+    #[allow(dead_code)]
     pub fn get_sender(&self, peer_id: &PeerId) -> Option<mpsc::Sender<Vec<u8>>> {
         self.sessions
             .lock()
@@ -138,6 +160,7 @@ impl SessionManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_session_info(&self, peer_id: &PeerId) -> Option<SessionInfo> {
         let sessions = self.sessions.lock().expect("sessions poisoned");
         sessions.get(peer_id).map(|s| SessionInfo {
@@ -179,8 +202,8 @@ impl SessionManager {
         self.sessions.lock().expect("sessions poisoned").len()
     }
 
-    pub fn phrase(&self) -> String {
-        self.phrase.lock().expect("phrase poisoned").clone()
+    pub fn phrase(&self) -> &[u8] {
+        self.phrase.as_bytes()
     }
 
     pub fn known_peers_list(&self) -> Vec<PeerAddr> {

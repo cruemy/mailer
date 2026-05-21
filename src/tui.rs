@@ -20,6 +20,7 @@ pub struct TuiState {
     pub session_mgr: Arc<SessionManager>,
     pub panic_handler: Arc<std::sync::Mutex<PanicHandler>>,
     pub quit: bool,
+    pub panic_requested: bool,
 }
 
 impl TuiState {
@@ -35,6 +36,7 @@ impl TuiState {
             session_mgr,
             panic_handler,
             quit: false,
+            panic_requested: false,
         }
     }
 
@@ -80,7 +82,7 @@ impl TuiState {
                     self.quit = true;
                 }
                 KeyCode::F(12) => {
-                    self.quit = true;
+                    self.panic_requested = true;
                 }
                 _ => {}
             },
@@ -235,4 +237,36 @@ pub fn restore_terminal() -> std::io::Result<()> {
     disable_raw_mode()?;
     std::io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::PeerAddr;
+
+    #[test]
+    fn f12_requests_panic_shutdown_instead_of_plain_quit() {
+        let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(1);
+        let my_id = PeerId([1u8; 32]);
+        let session_mgr = Arc::new(SessionManager::new(
+            crate::crypto::LockedBytes::new(b"phrase".to_vec()),
+            msg_tx,
+            Duration::from_secs(300),
+            PeerAddr {
+                ip: "127.0.0.1".parse().expect("valid ip"),
+                port: 19000,
+            },
+            my_id,
+        ));
+        let panic_handler = Arc::new(std::sync::Mutex::new(PanicHandler::new(false)));
+        let mut state = TuiState::new(my_id, session_mgr, panic_handler);
+
+        state.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::F(12),
+            KeyModifiers::NONE,
+        )));
+
+        assert!(state.panic_requested);
+        assert!(!state.quit);
+    }
 }

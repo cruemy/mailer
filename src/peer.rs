@@ -1,12 +1,14 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use tokio::sync::{mpsc, Semaphore};
+use x25519_dalek::PublicKey;
 use zeroize::Zeroize;
 
 use crate::auth::{perform_handshake, AuthRole};
+use crate::crypto::LockedDhSecret;
 use crate::protocol::{apply_padding, read_frame, remove_padding, write_frame};
 use crate::ratchet::{DoubleRatchet, ReceivedFrame};
 use crate::session::SessionManager;
@@ -16,6 +18,124 @@ use crate::types::{
 };
 
 const MAX_JSON_SIZE: usize = 1024 * 64; // 64 KB
+const MAX_CONCURRENT_HANDSHAKES: usize = 4;
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const FRAME_VERSION: u8 = 1;
+const FRAME_FLAG_DH_PUB: u8 = 1;
+
+fn handshake_limiter() -> &'static Semaphore {
+    static LIMITER: OnceLock<Semaphore> = OnceLock::new();
+    LIMITER.get_or_init(|| Semaphore::new(MAX_CONCURRENT_HANDSHAKES))
+}
+
+fn encode_ratchet_frame(encrypted: crate::ratchet::EncryptedFrame) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(
+        1 + 1 + 8 + 8 + 12 + encrypted.dh_public_key.map(|_| 32).unwrap_or(0) + encrypted.ciphertext.len() + 16,
+    );
+    let flags = if encrypted.dh_public_key.is_some() {
+        FRAME_FLAG_DH_PUB
+    } else {
+        0
+    };
+    frame.push(FRAME_VERSION);
+    frame.push(flags);
+    frame.extend_from_slice(&encrypted.msg_number.to_be_bytes());
+    frame.extend_from_slice(&encrypted.dh_epoch.to_be_bytes());
+    frame.extend_from_slice(&encrypted.nonce);
+    if let Some(dh_pub) = encrypted.dh_public_key {
+        frame.extend_from_slice(dh_pub.as_bytes());
+    }
+    frame.extend_from_slice(&encrypted.ciphertext);
+    frame.extend_from_slice(&encrypted.tag);
+    frame
+}
+
+fn decode_ratchet_frame(frame: &[u8]) -> Option<ReceivedFrame> {
+    if frame.len() < 1 + 1 + 8 + 8 + 12 + 16 {
+        return None;
+    }
+
+    let version = frame[0];
+    if version != FRAME_VERSION {
+        return None;
+    }
+
+    let flags = frame[1];
+    if flags & !FRAME_FLAG_DH_PUB != 0 {
+        return None;
+    }
+
+    let mut cursor = 2;
+    let msg_number = u64::from_be_bytes(frame[cursor..cursor + 8].try_into().ok()?);
+    cursor += 8;
+    let dh_epoch = u64::from_be_bytes(frame[cursor..cursor + 8].try_into().ok()?);
+    cursor += 8;
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&frame[cursor..cursor + 12]);
+    cursor += 12;
+
+    let dh_public_key = if flags & FRAME_FLAG_DH_PUB != 0 {
+        if frame.len() < cursor + 32 + 16 {
+            return None;
+        }
+        let mut dh_bytes = [0u8; 32];
+        dh_bytes.copy_from_slice(&frame[cursor..cursor + 32]);
+        cursor += 32;
+        Some(PublicKey::from(dh_bytes))
+    } else {
+        None
+    };
+
+    if frame.len() < cursor + 16 {
+        return None;
+    }
+    let tag_start = frame.len() - 16;
+    let ciphertext = frame[cursor..tag_start].to_vec();
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&frame[tag_start..]);
+
+    Some(ReceivedFrame {
+        nonce,
+        msg_number,
+        dh_epoch,
+        ciphertext,
+        tag,
+        dh_public_key,
+    })
+}
+
+fn session_transcript(
+    is_initiator: bool,
+    tls_exporter: &[u8; 32],
+    our_peer_id: PeerId,
+    their_peer_id: PeerId,
+    our_public: PublicKey,
+    their_public: PublicKey,
+) -> [u8; 32] {
+    let (initiator_id, responder_id, initiator_pub, responder_pub) = if is_initiator {
+        (our_peer_id, their_peer_id, our_public, their_public)
+    } else {
+        (their_peer_id, our_peer_id, their_public, our_public)
+    };
+    crate::crypto::sha256_many(&[
+        b"sesame-session-v1",
+        tls_exporter,
+        &initiator_id.0,
+        &responder_id.0,
+        initiator_pub.as_bytes(),
+        responder_pub.as_bytes(),
+        &[FRAME_VERSION],
+    ])
+}
+
+fn frame_aad_prefix(transcript: &[u8; 32], sender: PeerId, receiver: PeerId) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(1 + 32 + 32 + 32);
+    aad.push(FRAME_VERSION);
+    aad.extend_from_slice(transcript);
+    aad.extend_from_slice(&sender.0);
+    aad.extend_from_slice(&receiver.0);
+    aad
+}
 
 pub async fn connect_peer(
     addr: PeerAddr,
@@ -108,24 +228,36 @@ pub async fn handle_outgoing(
 #[allow(clippy::too_many_arguments)]
 async fn run_peer_session(
     mut tls_stream: tokio_rustls::TlsStream<tokio::net::TcpStream>,
-    _peer_id: PeerId,
+    peer_id: PeerId,
     peer_addr: PeerAddr,
     session_mgr: Arc<SessionManager>,
     is_initiator: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let phrase = session_mgr.phrase();
+    let _handshake_permit = handshake_limiter().acquire().await?;
     let role = if is_initiator {
         AuthRole::Initiator
     } else {
         AuthRole::Responder
     };
 
-    let auth = perform_handshake(&mut tls_stream, &phrase, role).await?;
-    let mut session_key = auth.session_key;
+    let tls_exporter = crate::tls::export_transcript_key(&tls_stream)?;
 
-    let mut rng = rand::rngs::OsRng;
-    let our_secret = EphemeralSecret::random_from_rng(&mut rng);
-    let our_public = PublicKey::from(&our_secret);
+    let auth = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        perform_handshake(
+            &mut tls_stream,
+            session_mgr.phrase(),
+            role,
+            session_mgr.my_peer_id(),
+            peer_id,
+            &tls_exporter,
+        ),
+    )
+    .await??;
+    let session_key = auth.session_key;
+
+    let our_secret = LockedDhSecret::generate();
+    let our_public = our_secret.public_key();
 
     let mut their_pub_bytes = [0u8; 32];
     let mut our_pub_bytes = [0u8; 32];
@@ -140,7 +272,22 @@ async fn run_peer_session(
     }
 
     let their_public = PublicKey::from(their_pub_bytes);
-    let root_chain = crate::crypto::hkdf_derive(&session_key, b"sesame-root");
+    let shared_secret = our_secret.diffie_hellman(&their_public);
+    let transcript = session_transcript(
+        is_initiator,
+        &tls_exporter,
+        session_mgr.my_peer_id(),
+        peer_id,
+        our_public,
+        their_public,
+    );
+    let mut root_chain = [0u8; 32];
+    crate::crypto::hkdf_expand_with_salt(
+        session_key.as_bytes(),
+        &crate::crypto::sha256_many(&[shared_secret.as_bytes(), &transcript]),
+        b"sesame-root-v1",
+        &mut root_chain,
+    );
 
     let mut ratchet = DoubleRatchet::new(
         &root_chain,
@@ -151,13 +298,15 @@ async fn run_peer_session(
         100,
     );
 
-    session_key.zeroize();
+    drop(session_key);
+    root_chain.zeroize();
+    let send_aad = frame_aad_prefix(&transcript, session_mgr.my_peer_id(), peer_id);
+    let recv_aad = frame_aad_prefix(&transcript, peer_id, session_mgr.my_peer_id());
 
     let (mut reader, mut writer) = tokio::io::split(tls_stream);
 
     let (msg_tx, mut msg_rx) = mpsc::channel::<Vec<u8>>(256);
 
-    let peer_id = auth.peer_id;
     let session_handle = crate::session::SessionHandle {
         peer_id,
         peer_addr: peer_addr.clone(),
@@ -198,22 +347,14 @@ async fn run_peer_session(
             flags: FLAG_PEER_LIST_REQ,
         };
         if let Ok(data) = serde_json::to_vec(&req) {
-            let encrypted = ratchet.encrypt(&data);
-            let mut frame = Vec::new();
-            frame.extend_from_slice(&encrypted.nonce);
-            frame.extend_from_slice(&encrypted.ciphertext);
-            frame.extend_from_slice(&encrypted.tag);
-            if let Some(dh_pub) = &encrypted.dh_public_key {
-                frame.push(1);
-                frame.extend_from_slice(dh_pub.as_bytes());
-            } else {
-                frame.push(0);
-            }
+            let encrypted = ratchet.encrypt(&data, &send_aad);
+            let frame = encode_ratchet_frame(encrypted);
             let padded = apply_padding(&frame);
             let _ = write_frame(&mut writer, &padded).await;
         }
     }
 
+    let mut cancel_rx = session_mgr.cancel_rx();
     let mut dummy_timer = tokio::time::interval(crate::obfuscate::dummy_interval());
     dummy_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     dummy_timer.tick().await;
@@ -226,18 +367,8 @@ async fn run_peer_session(
                     None => break,
                 };
 
-                let encrypted = ratchet.encrypt(&data);
-                let mut frame = Vec::new();
-                frame.extend_from_slice(&encrypted.nonce);
-                frame.extend_from_slice(&encrypted.ciphertext);
-                frame.extend_from_slice(&encrypted.tag);
-
-                if let Some(dh_pub) = &encrypted.dh_public_key {
-                    frame.push(1);
-                    frame.extend_from_slice(dh_pub.as_bytes());
-                } else {
-                    frame.push(0);
-                }
+                let encrypted = ratchet.encrypt(&data, &send_aad);
+                let frame = encode_ratchet_frame(encrypted);
 
                 let padded = apply_padding(&frame);
                 if write_frame(&mut writer, &padded).await.is_err() {
@@ -255,45 +386,12 @@ async fn run_peer_session(
                     Err(_) => continue,
                 };
 
-                let unpadded_len = unpadded.len();
-                if unpadded_len < 12 + 16 + 1 {
-                    continue;
-                }
-
-                let mut nonce = [0u8; 12];
-                nonce.copy_from_slice(&unpadded[..12]);
-
-                let has_dh_pub = unpadded[unpadded_len - 1] == 1;
-                let tag_end = unpadded_len - 1;
-                let tag_start = tag_end - 16;
-                let ct_end = tag_start;
-
-                let mut tag = [0u8; 16];
-                tag.copy_from_slice(&unpadded[tag_start..tag_end]);
-
-                let ciphertext = unpadded[12..ct_end].to_vec();
-
-                let dh_public_key = if has_dh_pub {
-                    let dh_start = tag_end + 1;
-                    let dh_end = dh_start + 32;
-                    if dh_end > unpadded_len {
-                        continue;
-                    }
-                    let mut dh_bytes = [0u8; 32];
-                    dh_bytes.copy_from_slice(&unpadded[dh_start..dh_end]);
-                    Some(PublicKey::from(dh_bytes))
-                } else {
-                    None
+                let received = match decode_ratchet_frame(unpadded) {
+                    Some(frame) => frame,
+                    None => continue,
                 };
 
-                let received = ReceivedFrame {
-                    nonce,
-                    ciphertext,
-                    tag,
-                    dh_public_key,
-                };
-
-                let plaintext = match ratchet.decrypt(&received) {
+                let plaintext = match ratchet.decrypt(&received, &recv_aad) {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
@@ -320,17 +418,8 @@ async fn run_peer_session(
                             flags: FLAG_PEER_LIST_RES,
                         };
                         if let Ok(data) = serde_json::to_vec(&resp) {
-                            let encrypted = ratchet.encrypt(&data);
-                            let mut frame = Vec::new();
-                            frame.extend_from_slice(&encrypted.nonce);
-                            frame.extend_from_slice(&encrypted.ciphertext);
-                            frame.extend_from_slice(&encrypted.tag);
-                            if let Some(dh_pub) = &encrypted.dh_public_key {
-                                frame.push(1);
-                                frame.extend_from_slice(dh_pub.as_bytes());
-                            } else {
-                                frame.push(0);
-                            }
+                            let encrypted = ratchet.encrypt(&data, &send_aad);
+                            let frame = encode_ratchet_frame(encrypted);
                             let padded = apply_padding(&frame);
                             let _ = write_frame(&mut writer, &padded).await;
                         }
@@ -367,18 +456,19 @@ async fn run_peer_session(
                     flags: FLAG_DUMMY,
                 };
                 if let Ok(data) = serde_json::to_vec(&dummy_msg) {
-                    let encrypted = ratchet.encrypt(&data);
-                    let mut frame = Vec::new();
-                    frame.extend_from_slice(&encrypted.nonce);
-                    frame.extend_from_slice(&encrypted.ciphertext);
-                    frame.extend_from_slice(&encrypted.tag);
-                    frame.push(0);
+                    let encrypted = ratchet.encrypt(&data, &send_aad);
+                    let frame = encode_ratchet_frame(encrypted);
                     let padded = apply_padding(&frame);
                     let _ = write_frame(&mut writer, &padded).await;
                 }
                 let interval = crate::obfuscate::dummy_interval();
                 dummy_timer = tokio::time::interval(interval);
                 dummy_timer.tick().await;
+            }
+            changed = cancel_rx.changed() => {
+                if changed.is_err() || *cancel_rx.borrow() {
+                    break;
+                }
             }
         }
     }
@@ -400,4 +490,65 @@ async fn run_peer_session(
 
     // "disconnected" is not sent here — remove_session handles
     // SYSTEM_ALONE broadcast if no peers remain
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ratchet::EncryptedFrame;
+
+    #[test]
+    fn ratchet_frame_round_trips_with_dh_public_key() {
+        let dh_public_key = PublicKey::from([9u8; 32]);
+        let encrypted = EncryptedFrame {
+            nonce: [1u8; 12],
+            msg_number: 7,
+            dh_epoch: 8,
+            ciphertext: vec![2, 3, 4, 5],
+            tag: [6u8; 16],
+            dh_public_key: Some(dh_public_key),
+        };
+
+        let encoded = encode_ratchet_frame(encrypted);
+        let decoded = decode_ratchet_frame(&encoded).expect("valid DH frame");
+
+        assert_eq!(decoded.nonce, [1u8; 12]);
+        assert_eq!(decoded.msg_number, 7);
+        assert_eq!(decoded.dh_epoch, 8);
+        assert_eq!(decoded.ciphertext, vec![2, 3, 4, 5]);
+        assert_eq!(decoded.tag, [6u8; 16]);
+        assert_eq!(decoded.dh_public_key.unwrap().as_bytes(), dh_public_key.as_bytes());
+    }
+
+    #[test]
+    fn ratchet_frame_rejects_unknown_flags() {
+        let encrypted = EncryptedFrame {
+            nonce: [1u8; 12],
+            msg_number: 0,
+            dh_epoch: 0,
+            ciphertext: vec![2, 3],
+            tag: [4u8; 16],
+            dh_public_key: None,
+        };
+        let mut encoded = encode_ratchet_frame(encrypted);
+        encoded[1] = 0x80;
+
+        assert!(decode_ratchet_frame(&encoded).is_none());
+    }
+
+    #[test]
+    fn ratchet_frame_rejects_unknown_version() {
+        let encrypted = EncryptedFrame {
+            nonce: [1u8; 12],
+            msg_number: 0,
+            dh_epoch: 0,
+            ciphertext: vec![2, 3],
+            tag: [4u8; 16],
+            dh_public_key: None,
+        };
+        let mut encoded = encode_ratchet_frame(encrypted);
+        encoded[0] = FRAME_VERSION + 1;
+
+        assert!(decode_ratchet_frame(&encoded).is_none());
+    }
 }

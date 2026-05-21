@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::io::Read;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use zeroize::Zeroize;
 
 fn spawn_supervised<F, Fut>(f: F, name: &'static str)
 where
@@ -20,6 +22,7 @@ where
 mod auth;
 mod crypto;
 mod obfuscate;
+mod os_hardening;
 mod panic;
 mod peer;
 mod protocol;
@@ -30,6 +33,7 @@ mod tui;
 mod types;
 
 use panic::PanicHandler;
+use crypto::LockedBytes;
 use types::{
     ChatMessage, PeerAddr, PeerId, FLAG_SYSTEM_ALONE, FLAG_SYSTEM_INFO, FLAG_SYSTEM_JOIN,
     FLAG_SYSTEM_LEAVE,
@@ -37,49 +41,66 @@ use types::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+    os_hardening::apply_process_hardening();
+
     let mut peers: Vec<PeerAddr> = Vec::new();
-    let mut phrase = String::new();
-    let mut decoy_phrase = String::new();
+    let mut phrase_bytes: Vec<u8> = Vec::new();
+    let mut decoy_phrase_bytes: Vec<u8> = Vec::new();
     let mut start_decoy = false;
     let mut listen_port: u16 = 9000;
     let mut inactivity_timeout_secs: u64 = 300;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
             "--peer" => {
-                i += 1;
-                let addr: PeerAddr = args[i]
+                let peer = args.next().ok_or("missing value for --peer")?;
+                let addr: PeerAddr = peer
                     .parse()
-                    .map_err(|e: String| format!("invalid --peer '{}': {e}", args[i]))?;
+                    .map_err(|e: String| format!("invalid --peer '{peer}': {e}"))?;
                 peers.push(addr);
             }
             "--phrase" => {
-                i += 1;
-                phrase = args[i].clone();
+                phrase_bytes = args.next().ok_or("missing value for --phrase")?.into_bytes();
+            }
+            "--phrase-fd" => {
+                let fd: i32 = args
+                    .next()
+                    .ok_or("missing value for --phrase-fd")?
+                    .parse()
+                    .map_err(|_| "invalid phrase fd")?;
+                phrase_bytes = read_phrase_fd(fd)?;
             }
             "--decoy-phrase" => {
-                i += 1;
-                decoy_phrase = args[i].clone();
+                decoy_phrase_bytes = args
+                    .next()
+                    .ok_or("missing value for --decoy-phrase")?
+                    .into_bytes();
             }
             "--decoy" => {
                 start_decoy = true;
             }
             "--port" => {
-                i += 1;
-                listen_port = args[i].parse().map_err(|_| "invalid port")?;
+                listen_port = args
+                    .next()
+                    .ok_or("missing value for --port")?
+                    .parse()
+                    .map_err(|_| "invalid port")?;
             }
             "--inactivity-timeout" => {
-                i += 1;
-                inactivity_timeout_secs = args[i].parse().map_err(|_| "invalid timeout")?;
+                inactivity_timeout_secs = args
+                    .next()
+                    .ok_or("missing value for --inactivity-timeout")?
+                    .parse()
+                    .map_err(|_| "invalid timeout")?;
             }
             "--help" | "-h" => {
-                println!("Usage: sesame --peer IP:PORT [--peer IP:PORT ...] --phrase \"frase\" [--decoy-phrase \"señuelo\"] [--decoy] [--port 9000] [--inactivity-timeout 300]");
+                println!("Usage: sesame --peer IP:PORT [--peer IP:PORT ...] (--phrase \"frase\" | --phrase-fd FD) [--decoy-phrase \"señuelo\"] [--decoy] [--port 9000] [--inactivity-timeout 300]");
                 println!();
                 println!("Flags:");
                 println!("  --peer IP:PORT              Known peer to connect to (can be repeated)");
                 println!("  --phrase \"phrase\"            Auth phrase");
+                println!("  --phrase-fd FD               Read auth phrase from file descriptor");
                 println!("  --decoy-phrase \"phrase\"      Decoy phrase (default: decoy-<phrase>)");
                 println!("  --decoy                     Start in decoy mode");
                 println!("  --port N                    Listen port (default: 9000)");
@@ -92,19 +113,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        i += 1;
     }
 
-    if phrase.is_empty() {
-        eprintln!("Usage: sesame --peer IP:PORT [--peer IP:PORT ...] --phrase \"frase\" [--decoy-phrase \"señuelo\"] [--decoy] [--port 9000] [--inactivity-timeout 300]");
+    if phrase_bytes.is_empty() {
+        eprintln!("Usage: sesame --peer IP:PORT [--peer IP:PORT ...] (--phrase \"frase\" | --phrase-fd FD) [--decoy-phrase \"señuelo\"] [--decoy] [--port 9000] [--inactivity-timeout 300]");
         std::process::exit(1);
     }
 
-    if decoy_phrase.is_empty() {
-        decoy_phrase = format!("decoy-{}", &phrase[..phrase.len().min(16)]);
+    if decoy_phrase_bytes.is_empty() {
+        decoy_phrase_bytes.extend_from_slice(b"decoy-");
+        decoy_phrase_bytes.extend_from_slice(&phrase_bytes[..phrase_bytes.len().min(16)]);
     }
 
-    let active_phrase = if start_decoy { &decoy_phrase } else { &phrase };
+    let locked_phrase = if start_decoy {
+        LockedBytes::new(std::mem::take(&mut decoy_phrase_bytes))
+    } else {
+        LockedBytes::new(std::mem::take(&mut phrase_bytes))
+    };
+    phrase_bytes.zeroize();
+    decoy_phrase_bytes.zeroize();
 
     let (certs, key) = tls::generate_cert()?;
     let my_id = PeerId::from_cert_der(certs[0].as_ref());
@@ -121,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let session_mgr = Arc::new(session::SessionManager::new(
-        active_phrase.to_string(),
+        locked_phrase,
         msg_tx.clone(),
         Duration::from_secs(inactivity_timeout_secs),
         my_listen_addr,
@@ -236,6 +263,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match maybe_event {
                     Some(event) => {
                         tui_state.handle_event(event);
+                        if tui_state.panic_requested {
+                            session_mgr.panic_shutdown();
+                            tui_state.clear_messages();
+                            break Ok(());
+                        }
                         if tui_state.quit {
                             break Ok(());
                         }
@@ -270,11 +302,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let client_config = tls::make_client_config(certs, kc)?;
                                 let new_acceptor = TlsAcceptor::from(server_config);
                                 let new_connector = TlsConnector::from(client_config);
-                                *shared_acceptor.lock().expect("acceptor poisoned") = new_acceptor;
-                                *shared_connector.lock().expect("connector poisoned") = new_connector;
-                                session_mgr.clear_sessions();
-                                session_mgr.clear_known_peers();
-                                tui_state.my_id = new_id;
+                                 *shared_acceptor.lock().expect("acceptor poisoned") = new_acceptor;
+                                 *shared_connector.lock().expect("connector poisoned") = new_connector;
+                                 session_mgr.clear_sessions();
+                                 session_mgr.clear_known_peers();
+                                 session_mgr.set_my_peer_id(new_id);
+                                 tui_state.my_id = new_id;
                                 tui_state.clear_messages();
                                 tui_state.add_message(new_id, "[new identity — waiting for connections]".to_string(), 0);
                             }
@@ -304,4 +337,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn read_phrase_fd(fd: i32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        let path = format!("/proc/self/fd/{fd}");
+        let mut file = std::fs::File::open(path)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+            bytes.pop();
+        }
+        Ok(bytes)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err("--phrase-fd is only supported on Unix targets".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn read_phrase_fd_trims_newline() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+
+        let path = std::env::temp_dir().join("sesame-phrase-fd-test");
+        {
+            let mut file = std::fs::File::create(&path).expect("create phrase fd fixture");
+            file.write_all(b"secret\n").expect("write phrase fixture");
+        }
+        let file = std::fs::File::open(&path).expect("open phrase fd fixture");
+        let phrase = read_phrase_fd(file.as_raw_fd()).expect("read phrase fd");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(phrase, b"secret");
+    }
 }

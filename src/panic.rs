@@ -1,4 +1,4 @@
-use std::sync::Arc;pub struct PanicHandler {
+pub struct PanicHandler {
     pub is_decoy: bool,
 }
 
