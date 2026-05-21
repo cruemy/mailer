@@ -5,7 +5,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::panic::PanicHandler;
@@ -22,6 +22,8 @@ pub struct TuiState {
     pub panic_handler: Arc<std::sync::Mutex<PanicHandler>>,
     pub quit: bool,
     pub panic_requested: bool,
+    scroll_offset: usize,
+    auto_scroll: bool,
 }
 
 impl TuiState {
@@ -38,13 +40,21 @@ impl TuiState {
             panic_handler,
             quit: false,
             panic_requested: false,
+            scroll_offset: 0,
+            auto_scroll: true,
         }
     }
 
     pub fn add_message(&mut self, peer_id: PeerId, text: String, flags: u8) {
+        let was_at_bottom = self.auto_scroll
+            || self.scroll_offset >= self.messages.len().saturating_sub(5);
         self.messages.push((peer_id, text, flags));
         while self.messages.len() > MAX_MESSAGES {
             self.messages.remove(0);
+            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        }
+        if was_at_bottom {
+            self.auto_scroll = true;
         }
     }
 
@@ -85,13 +95,26 @@ impl TuiState {
                 KeyCode::F(12) => {
                     self.panic_requested = true;
                 }
+                KeyCode::PageUp => {
+                    self.auto_scroll = false;
+                    let jump = self.messages.len().saturating_sub(5);
+                    self.scroll_offset = self.scroll_offset.saturating_add(5).min(jump);
+                }
+                KeyCode::PageDown => {
+                    if self.scroll_offset <= 5 && !self.messages.is_empty() {
+                        self.auto_scroll = true;
+                        self.scroll_offset = 0;
+                    } else {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(5);
+                    }
+                }
                 _ => {}
             },
             _ => {}
         }
     }
 
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn render(&mut self, frame: &mut Frame) {
         let panic_mode = self.panic_handler.lock().expect("panic_handler poisoned").is_decoy;
 
         let main_chunks = Layout::horizontal([
@@ -118,9 +141,10 @@ impl TuiState {
         self.render_peer_list(frame, right_chunks[1]);
     }
 
-    fn render_chat(&self, frame: &mut Frame, area: Rect, panic_mode: bool) {
+    fn render_chat(&mut self, frame: &mut Frame, area: Rect, panic_mode: bool) {
         let peer_count = self.session_mgr.peer_count();
         let max_width = area.width.saturating_sub(3) as usize;
+        let visible_rows = area.height.saturating_sub(2) as usize;
 
         let items: Vec<ListItem> = self
             .messages
@@ -153,12 +177,19 @@ impl TuiState {
             })
             .collect();
 
+        if self.auto_scroll {
+            self.scroll_offset = (items.len()).saturating_sub(visible_rows);
+        }
+        let offset = self.scroll_offset.min(items.len().saturating_sub(1));
+
         let mode_indicator = if panic_mode { " [PANIC]" } else { "" };
         let title = format!(" Chat — {peer_count} peers{mode_indicator} ");
+        let mut list_state = ListState::default();
+        *list_state.offset_mut() = offset;
         let chat = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
             .style(Style::default());
-        frame.render_widget(chat, area);
+        frame.render_stateful_widget(chat, area, &mut list_state);
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect) {

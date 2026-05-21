@@ -276,18 +276,22 @@ async fn run_peer_session(
     let our_secret = LockedDhSecret::generate();
     let our_public = our_secret.public_key();
 
-    let mut their_pub_bytes = [0u8; 32];
-    let mut our_pub_bytes = [0u8; 32];
-    our_pub_bytes.copy_from_slice(our_public.as_bytes());
+    let mut their_buf = [0u8; 34];
+    let mut our_buf = [0u8; 34];
+    our_buf[..32].copy_from_slice(our_public.as_bytes());
+    our_buf[32..34].copy_from_slice(&session_mgr.my_listen_addr.port.to_be_bytes());
 
     if is_initiator {
-        tls_stream.write_all(&our_pub_bytes).await?;
-        tls_stream.read_exact(&mut their_pub_bytes).await?;
+        tls_stream.write_all(&our_buf).await?;
+        tls_stream.read_exact(&mut their_buf).await?;
     } else {
-        tls_stream.read_exact(&mut their_pub_bytes).await?;
-        tls_stream.write_all(&our_pub_bytes).await?;
+        tls_stream.read_exact(&mut their_buf).await?;
+        tls_stream.write_all(&our_buf).await?;
     }
 
+    let mut their_pub_bytes = [0u8; 32];
+    their_pub_bytes.copy_from_slice(&their_buf[..32]);
+    let their_listen_port = u16::from_be_bytes([their_buf[32], their_buf[33]]);
     let their_public = PublicKey::from(their_pub_bytes);
     let shared_secret = our_secret.diffie_hellman(&their_public);
     let transcript = session_transcript(
@@ -325,9 +329,13 @@ async fn run_peer_session(
     let (msg_tx, mut msg_rx) = mpsc::channel::<Vec<u8>>(256);
     let cancel_notify = Arc::new(Notify::new());
 
+    let session_addr = PeerAddr {
+        ip: peer_addr.ip,
+        port: their_listen_port,
+    };
     let session_handle = crate::session::SessionHandle {
         peer_id,
-        peer_addr: peer_addr.clone(),
+        peer_addr: session_addr,
         sender: msg_tx,
         connected_since: Instant::now(),
         last_message: Instant::now(),
