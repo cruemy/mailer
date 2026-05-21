@@ -334,9 +334,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Err(e) = result {
         eprintln!("[sesame] error: {e}");
+        std::process::exit(1);
     }
 
-    Ok(())
+    std::process::exit(0);
 }
 
 fn read_phrase_fd(fd: i32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

@@ -49,13 +49,18 @@ pub async fn perform_handshake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         their_peer_id,
     )
     .await?;
+    let (peer_a, peer_b) = if our_peer_id.0 < their_peer_id.0 {
+        (our_peer_id, their_peer_id)
+    } else {
+        (their_peer_id, our_peer_id)
+    };
     let session_key = LockedKey::new(sha256_many(&[
         &pake_key,
         tls_exporter,
         &our_salt,
         &their_salt,
-        &our_peer_id.0,
-        &their_peer_id.0,
+        &peer_a.0,
+        &peer_b.0,
     ]));
     let initiator_proof = auth_proof(
         session_key.as_bytes(),
