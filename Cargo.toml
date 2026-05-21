@@ -1,5 +1,5 @@
 [package]
-name = "sesame"
+name = "sesame_cli"
 version = "0.2.0"
 edition = "2024"
 description = "P2P encrypted chat with deniable authentication, panic mode, and multi-peer mesh"
@@ -8,8 +8,12 @@ homepage = "https://github.com/cruemy/sesame"
 license = "MIT"
 readme = "README.md"
 rust-version = "1.85"
-keywords = ["p2p", "encrypted-chat", "deniable-authentication", "panic-mode", "mesh-network"]
+keywords = ["p2p", "encrypted-chat", "deniable-auth", "panic-mode", "mesh"]
 categories = ["cryptography", "command-line-utilities"]
+
+[[bin]]
+name = "sesame"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
