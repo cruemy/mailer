@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Notify};
 
 use crate::crypto::LockedBytes;
 use crate::types::{ChatMessage, PeerAddr, PeerId, SessionInfo, FLAG_SYSTEM_ALONE, FLAG_SYSTEM_INFO};
@@ -14,6 +14,7 @@ pub struct SessionHandle {
     pub sender: mpsc::Sender<Vec<u8>>,
     pub connected_since: Instant,
     pub last_message: Instant,
+    pub cancel_notify: Arc<Notify>,
 }
 
 pub struct SessionManager {
@@ -93,30 +94,34 @@ impl SessionManager {
     }
 
     pub fn remove_session(&self, peer_id: &PeerId) {
-        let addr = {
+        let removed = {
             let mut sessions = self.sessions.lock().expect("sessions poisoned");
-            sessions.remove(peer_id).map(|h| h.peer_addr)
+            sessions.remove(peer_id)
         };
-        if let Some(addr) = addr {
-            let remaining = self.peer_count();
-            if remaining >= 2 {
-                self.known_peers.lock().expect("known_peers poisoned").insert(*peer_id, addr);
-            } else {
-                self.known_peers.lock().expect("known_peers poisoned").clear();
-                let msg = ChatMessage {
-                    peer_id: *peer_id,
-                    text: String::new(),
-                    timestamp: 0,
-                    flags: FLAG_SYSTEM_ALONE,
-                };
-                let _ = self.message_tx.try_send((*peer_id, msg));
-            }
+        if let Some(handle) = removed {
+            handle.cancel_notify.notify_one();
+            let addr = handle.peer_addr;
+            self.known_peers.lock().expect("known_peers poisoned").insert(*peer_id, addr);
+            let msg = ChatMessage {
+                peer_id: *peer_id,
+                text: format!("connection lost, reconnecting to {peer_id}..."),
+                timestamp: 0,
+                flags: FLAG_SYSTEM_INFO,
+            };
+            let _ = self.message_tx.try_send((*peer_id, msg));
         }
     }
 
     pub fn clear_sessions(&self) {
-        let had_sessions = !self.sessions.lock().expect("sessions poisoned").is_empty();
-        self.sessions.lock().expect("sessions poisoned").clear();
+        let mut handles: Vec<SessionHandle> = {
+            let mut sessions = self.sessions.lock().expect("sessions poisoned");
+            sessions.drain().map(|(_, h)| h).collect()
+        };
+        let had_sessions = !handles.is_empty();
+        for h in &handles {
+            h.cancel_notify.notify_one();
+        }
+        handles.clear();
         self.known_peers.lock().expect("known_peers poisoned").clear();
         if had_sessions {
             let msg = ChatMessage {
@@ -131,7 +136,14 @@ impl SessionManager {
 
     pub fn panic_shutdown(&self) {
         let _ = self.cancel_tx.send(true);
-        self.sessions.lock().expect("sessions poisoned").clear();
+        let handles: Vec<SessionHandle> = {
+            let mut sessions = self.sessions.lock().expect("sessions poisoned");
+            sessions.drain().map(|(_, h)| h).collect()
+        };
+        for h in &handles {
+            h.cancel_notify.notify_one();
+        }
+        drop(handles);
         self.known_peers.lock().expect("known_peers poisoned").clear();
     }
 

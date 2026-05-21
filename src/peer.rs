@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Notify, Semaphore};
 use x25519_dalek::PublicKey;
 use zeroize::Zeroize;
 
@@ -144,6 +144,23 @@ pub async fn connect_peer(
 ) {
     match tokio::net::TcpStream::connect(addr.to_string()).await {
         Ok(stream) => {
+            let stream = match stream.into_std() {
+                Ok(std) => {
+                    let socket_ref = socket2::SockRef::from(&std);
+                    let _ = socket_ref.set_keepalive(true);
+                    let _ = socket_ref.set_tcp_keepalive(
+                        &socket2::TcpKeepalive::new()
+                            .with_time(std::time::Duration::from_secs(15))
+                            .with_interval(std::time::Duration::from_secs(5)),
+                    );
+                    tokio::net::TcpStream::from_std(std)
+                        .expect("from_std after keepalive")
+                }
+                Err(e) => {
+                    session_mgr.system_msg(&format!("connect_peer: into_std failed: {e}"));
+                    return;
+                }
+            };
             let dns_name = match rustls::pki_types::ServerName::try_from(addr.ip.to_string()) {
                 Ok(n) => n,
                 Err(e) => {
@@ -306,6 +323,7 @@ async fn run_peer_session(
     let (mut reader, mut writer) = tokio::io::split(tls_stream);
 
     let (msg_tx, mut msg_rx) = mpsc::channel::<Vec<u8>>(256);
+    let cancel_notify = Arc::new(Notify::new());
 
     let session_handle = crate::session::SessionHandle {
         peer_id,
@@ -313,6 +331,7 @@ async fn run_peer_session(
         sender: msg_tx,
         connected_since: Instant::now(),
         last_message: Instant::now(),
+        cancel_notify: cancel_notify.clone(),
     };
 
     if let Err(e) = session_mgr.register_session(session_handle) {
@@ -359,6 +378,9 @@ async fn run_peer_session(
     dummy_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     dummy_timer.tick().await;
 
+    let max_dummy_failures: usize = 3;
+    let mut consecutive_dummy_failures: usize = 0;
+
     loop {
         tokio::select! {
             data = msg_rx.recv() => {
@@ -374,6 +396,7 @@ async fn run_peer_session(
                 if write_frame(&mut writer, &padded).await.is_err() {
                     break;
                 }
+                consecutive_dummy_failures = 0;
             }
             result = read_frame(&mut reader) => {
                 let padded = match result {
@@ -459,7 +482,15 @@ async fn run_peer_session(
                     let encrypted = ratchet.encrypt(&data, &send_aad);
                     let frame = encode_ratchet_frame(encrypted);
                     let padded = apply_padding(&frame);
-                    let _ = write_frame(&mut writer, &padded).await;
+                    if write_frame(&mut writer, &padded).await.is_err() {
+                        consecutive_dummy_failures += 1;
+                        if consecutive_dummy_failures >= max_dummy_failures {
+                            session_mgr.system_msg(&format!("connection lost to {peer_id}, reconnecting..."));
+                            break;
+                        }
+                    } else {
+                        consecutive_dummy_failures = 0;
+                    }
                 }
                 let interval = crate::obfuscate::dummy_interval();
                 dummy_timer = tokio::time::interval(interval);
@@ -469,6 +500,9 @@ async fn run_peer_session(
                 if changed.is_err() || *cancel_rx.borrow() {
                     break;
                 }
+            }
+            _ = cancel_notify.notified() => {
+                break;
             }
         }
     }

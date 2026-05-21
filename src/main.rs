@@ -1,4 +1,5 @@
 use std::sync::Arc;
+#[cfg(unix)]
 use std::io::Read;
 use std::time::Duration;
 
@@ -174,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 match tcp_listener.accept().await {
                     Ok((stream, addr)) => {
+                        let stream = apply_keepalive(stream);
                         let current_acceptor = {
                             let guard = acc.lock().expect("acceptor poisoned");
                             guard.clone()
@@ -203,14 +205,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "listener",
     );
 
-    // Reconnection loop — every 30s try known peers
+    // Reconnection loop — every 5s try known peers
     {
         let sm = session_mgr.clone();
         let sc = shared_connector.clone();
         spawn_supervised(
             move || async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     let addrs = sm.known_peers_list();
                     for addr in addrs {
                         if !sm.is_connected_to_addr(&addr) {
@@ -338,6 +340,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     std::process::exit(0);
+}
+
+fn apply_keepalive(stream: tokio::net::TcpStream) -> tokio::net::TcpStream {
+    let std = stream.into_std().expect("into_std failed for keepalive");
+    let socket_ref = socket2::SockRef::from(&std);
+    let _ = socket_ref.set_keepalive(true);
+    let _ = socket_ref.set_tcp_keepalive(
+        &socket2::TcpKeepalive::new()
+            .with_time(std::time::Duration::from_secs(15))
+            .with_interval(std::time::Duration::from_secs(5)),
+    );
+    tokio::net::TcpStream::from_std(std).expect("from_std after keepalive")
 }
 
 fn read_phrase_fd(fd: i32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
