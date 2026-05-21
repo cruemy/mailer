@@ -138,4 +138,32 @@ Usá la IP local (empieza con `192.168.`, `10.`, `172.16.`) — la que termina e
 
 ## Puerto y firewall
 
-Por defecto `9000`. Cambiá con `--port` si hace falta. Asegurate de tener el puerto abierto en el firewall para conexiones entrantes.
+Por defecto `9000`. Cambiá con `--port` si hace falta.
+
+### Firewall de Windows
+
+Si el otro peer no puede conectarse — incluso estando en la misma red — lo más probable es que Windows Firewall esté bloqueando el puerto.
+
+**Paso 1 — Crear regla de entrada** (PowerShell como Administrador):
+
+```powershell
+New-NetFirewallRule -DisplayName "Sesame P2P" -Direction Inbound -Protocol TCP -LocalPort 9000 -Action Allow
+```
+
+Esto permite tráfico TCP entrante en el puerto `9000` desde cualquier perfil de red (pública, privada, dominio). Cambiá el puerto si usaste `--port` con otro valor.
+
+**Paso 2 — Si el problema persiste, desactivar temporalmente el firewall** (solo para diagnóstico):
+
+```powershell
+Set-NetFirewallProfile -Profile (Get-NetConnectionProfile).NetworkCategory -Enabled False
+```
+
+Esto apaga el firewall **solo para el perfil de red activo** (Private, Public o Domain). Probá la conexión; si funciona, reactivalo con `-Enabled True`. Si el problema sigue incluso con el firewall desactivado, no es el firewall — revisá que estén en la misma red/subred y que las IPs sean correctas.
+
+**Para verificar conectividad local:**
+
+```powershell
+Test-NetConnection -ComputerName 127.0.0.1 -Port 9000
+```
+
+Si `TcpTestSucceeded` es `True`, sesame está escuchando bien. Si es `False`, revisá que el proceso esté corriendo. Luego probá el mismo comando desde la otra PC reemplazando `127.0.0.1` por la IP del que escucha.

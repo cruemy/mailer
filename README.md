@@ -96,6 +96,34 @@ cargo run --release -- --peer 192.168.1.99:9000 --peer 192.168.1.77:9000 --phras
 
 See [USAGE.md](USAGE.md) for detailed scenarios and CLI reference.
 
+## Windows Firewall
+
+If another peer can't reach you (connection refused / timeout), Windows Firewall is usually the culprit.
+
+**Step 1 — Allow inbound port** (PowerShell as Administrator):
+
+```powershell
+New-NetFirewallRule -DisplayName "Sesame P2P" -Direction Inbound -Protocol TCP -LocalPort 9000 -Action Allow
+```
+
+This creates a firewall rule allowing TCP traffic on port `9000`. Change the port if you used `--port` with a different value.
+
+**Step 2 — Temporarily disable firewall for diagnostics** (PowerShell as Administrator):
+
+```powershell
+Set-NetFirewallProfile -Profile (Get-NetConnectionProfile).NetworkCategory -Enabled False
+```
+
+This turns off the firewall **only for your active network profile**. Test the connection; if it works, re-enable with `-Enabled True`. If it still fails with the firewall off, the issue is elsewhere (different subnet, wrong IP, etc.).
+
+**Verify local connectivity:**
+
+```powershell
+Test-NetConnection -ComputerName 127.0.0.1 -Port 9000
+```
+
+If `TcpTestSucceeded` is `True`, sesame is listening. Then test from the other PC using the listener's IP instead of `127.0.0.1`.
+
 ## License
 
 MIT
