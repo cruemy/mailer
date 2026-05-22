@@ -12,8 +12,38 @@ use crate::panic::PanicHandler;
 use crate::session::SessionManager;
 use crate::types::{ChatMessage, PeerId, FLAG_SYSTEM_INFO, FLAG_SYSTEM_JOIN, FLAG_SYSTEM_LEAVE, FLAG_REAL};
 
+// ═══════════════════════════════════════════════════════════════════════════
+// INTERFAZ DE TERMINAL (TUI) con Ratatui + Crossterm
+// ═══════════════════════════════════════════════════════════════════════════
+// Renderiza el chat en la terminal: historial de mensajes, entrada de texto,
+// lista de peers conectados, e indicador de modo (real/panico).
+//
+// Layout:
+// ┌───────────────────────┬──────────┐
+// │     Chat (75%)        │ Mode (3) │
+// │                       ├──────────┤
+// │                       │Peers list│
+// │                       │          │
+// │     Input (3 lines)   │          │
+// └───────────────────────┴──────────┘
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Maximo de mensajes en el historial (500). Despues de eso, los mas
+/// viejos se borran para no ocupar memoria infinita.
 const MAX_MESSAGES: usize = 500;
 
+/// Estado completo de la interfaz de terminal.
+///
+/// Campos
+/// * `messages` — historial de mensajes [(PeerId, texto, flags)]
+/// * `input` — lo que el usuario esta escribiendo actualmente
+/// * `my_id` — nuestro PeerId (para marcar nuestros mensajes como "you")
+/// * `session_mgr` — referencia al SessionManager
+/// * `panic_handler` — para saber si estamos en modo panico
+/// * `quit` — true si el usuario pidio salir (Esc)
+/// * `panic_requested` — true si el usuario pidio panico (F12)
+/// * `scroll_offset` — cuantas lineas nos desplazamos hacia arriba
+/// * `auto_scroll` — si estamos al final del chat (sigue nuevos mensajes)
 pub struct TuiState {
     pub messages: Vec<(PeerId, String, u8)>,
     pub input: String,
@@ -27,6 +57,13 @@ pub struct TuiState {
 }
 
 impl TuiState {
+    /// Crea un nuevo estado TUI.
+    ///
+    /// Parametros
+    /// * `my_id` — nuestro PeerId
+    /// * `session_mgr` — referencia al SessionManager global
+    /// * `panic_handler` — referencia al PanicHandler (para consultar
+    ///   si estamos en modo decoy y mostrar el indicador correcto)
     pub fn new(
         my_id: PeerId,
         session_mgr: Arc<SessionManager>,
@@ -45,6 +82,15 @@ impl TuiState {
         }
     }
 
+    /// Agrega un mensaje al historial.
+    ///
+    /// Si estamos cerca del final del scroll, el nuevo mensaje se
+    /// muestra automaticamente (auto_scroll = true).
+    ///
+    /// Parametros
+    /// * `peer_id` — quien envio el mensaje
+    /// * `text` — texto del mensaje
+    /// * `flags` — tipo de mensaje (para colorear/personalizar)
     pub fn add_message(&mut self, peer_id: PeerId, text: String, flags: u8) {
         let near_bottom = self.messages.len() > 5
             && self.scroll_offset >= self.messages.len().saturating_sub(5);
@@ -59,11 +105,25 @@ impl TuiState {
         }
     }
 
+    /// Limpia todos los mensajes y el input (se usa en panic/identity rotation).
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.input.clear();
     }
 
+    /// Procesa un evento de teclado.
+    ///
+    /// Teclas
+    /// * `Enter` — envia el mensaje escrito
+    /// * `Caracter` — escribe en el input
+    /// * `Backspace` — borra el ultimo caracter
+    /// * `Esc` — sale del programa (quit = true)
+    /// * `F12` — activa el modo panico (panic_requested = true)
+    /// * `PageUp` — desplaza el chat hacia arriba (5 lineas)
+    /// * `PageDown` — desplaza hacia abajo (vuelve a auto_scroll si llega al final)
+    ///
+    /// Parametros
+    /// * `event` — evento de crossterm (teclado, mouse, resize, etc.)
     pub fn handle_event(&mut self, event: Event) {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
@@ -112,6 +172,19 @@ impl TuiState {
         }
     }
 
+    /// Renderiza toda la interfaz en el frame de ratatui.
+    ///
+    /// Layout
+    /// ```
+    /// ┌───────────────────────┬──────────┐
+    /// │    75% Chat          │  25%     │
+    /// │                      ├──────────┤
+    /// │                      │ Mode (3) │
+    /// │                      │ Peers    │
+    /// ├──────────────────────┤          │
+    /// │  Input (3 lines)     │          │
+    /// └──────────────────────┴──────────┘
+    /// ```
     pub fn render(&mut self, frame: &mut Frame) {
         let panic_mode = self.panic_handler.lock().expect("panic_handler poisoned").is_decoy;
 
@@ -139,11 +212,19 @@ impl TuiState {
         self.render_peer_list(frame, right_chunks[1]);
     }
 
+    /// Devuelve el nombre visible de un peer (display name o PeerId en hex).
     fn peer_display_name(&self, peer_id: &PeerId) -> String {
         self.session_mgr.get_display_name(peer_id)
             .unwrap_or_else(|| peer_id.to_string())
     }
 
+    /// Renderiza el area del chat (lista de mensajes).
+    ///
+    /// Estilos
+    /// - Mensajes de JOIN/LEAVE: gris italica
+    /// - Mensajes de sistema: rojo bold
+    /// - Mensajes propios: cyan
+    /// - Mensajes de otros peers: verde con nombre
     fn render_chat(&mut self, frame: &mut Frame, area: Rect, panic_mode: bool) {
         let peer_count = self.session_mgr.peer_count();
         let max_width = area.width.saturating_sub(3) as usize;
@@ -194,14 +275,20 @@ impl TuiState {
         frame.render_widget(chat, area);
     }
 
+    /// Renderiza el area de entrada de texto.
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let input = Paragraph::new(self.input.as_str())
             .block(Block::default().borders(Borders::ALL).title(" Message "))
             .style(Style::default());
         frame.render_widget(input, area);
+        // Posiciona el cursor al final del texto
         frame.set_cursor_position((area.x + 1 + self.input.len() as u16, area.y + 1));
     }
 
+    /// Renderiza el indicador de modo (REAL MODE / PANIC MODE).
+    ///
+    /// Cuando estamos en modo panico (decoy), el indicador es ROJO
+    /// y dice "PANIC MODE". Es dificil no verlo.
     fn render_mode_indicator(&self, frame: &mut Frame, area: Rect, panic_mode: bool) {
         let label = if panic_mode {
             " PANIC MODE "
@@ -219,6 +306,10 @@ impl TuiState {
         frame.render_widget(block, area);
     }
 
+    /// Renderiza la lista de peers conectados.
+    ///
+    /// Muestra hasta `max_sessions` (10) peers. Cada peer se muestra
+    /// con su display name o PeerId.
     fn render_peer_list(&self, frame: &mut Frame, area: Rect) {
         let sessions = self.session_mgr.list_sessions();
         let items: Vec<ListItem> = sessions
@@ -238,6 +329,20 @@ impl TuiState {
     }
 }
 
+/// Envuelve texto en multiples lineas para que entre en un ancho maximo.
+///
+/// Como funciona
+/// 1. Si el texto entra en una linea, devuelve una sola linea
+/// 2. Si no, separa por palabras y va armando lineas
+/// 3. Si una palabra es mas larga que el ancho maximo, la pone igual
+///    (se va a cortar visualmente pero no perdemos datos)
+///
+/// Parametros
+/// * `text` — el texto a wrappear
+/// * `max_width` — ancho maximo en caracteres
+///
+/// Devuelve
+/// Vec de strings, cada uno es una linea que entra en max_width.
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     if text.len() <= max_width || max_width == 0 {
         return vec![text.to_string()];
@@ -265,11 +370,22 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
+/// Inicia un hilo que lee eventos del teclado y los envia por un canal.
+///
+/// Por que un hilo separado
+/// Crossterm necesita un thread bloqueante para leer eventos (poll/read).
+/// No podemos hacer eso en el loop async de Tokio porque bloquearia todo.
+/// Entonces lanzamos un `spawn_blocking` que solo lee eventos y los
+/// manda por un canal unbounded.
+///
+/// Devuelve
+/// El receptor del canal (para recibir eventos en el loop principal).
 pub fn spawn_event_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     tokio::task::spawn_blocking(move || {
         loop {
+            // Poll cada 100ms (no queremos quemar CPU)
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
                 if let Ok(event) = event::read() {
                     if tx.send(event).is_err() {
@@ -283,6 +399,16 @@ pub fn spawn_event_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> {
     rx
 }
 
+/// Configura la terminal para el modo TUI (pantalla alternativa + raw mode).
+///
+/// Que hace
+/// 1. Activa raw mode (captura teclas sin esperar Enter)
+/// 2. Cambia a la pantalla alternativa (no se ve el historial de la terminal)
+/// 3. Crea el backend de ratatui con Crossterm
+/// 4. Crea la terminal de ratatui
+///
+/// Devuelve
+/// La terminal de ratatui lista para usar, o error si algo falla.
 pub fn setup_terminal(
 ) -> std::io::Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>> {
     use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
@@ -296,6 +422,11 @@ pub fn setup_terminal(
     Terminal::new(backend)
 }
 
+/// Restaura la terminal al estado normal (reverse de setup_terminal).
+///
+/// Que hace
+/// 1. Sale de la pantalla alternativa
+/// 2. Desactiva raw mode
 pub fn restore_terminal() -> std::io::Result<()> {
     use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
     use crossterm::ExecutableCommand;
@@ -310,6 +441,7 @@ mod tests {
     use super::*;
     use crate::types::PeerAddr;
 
+    /// Verifica que F12 marca panic_requested (no quit).
     #[test]
     fn f12_requests_panic_shutdown_instead_of_plain_quit() {
         let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(1);

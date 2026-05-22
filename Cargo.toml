@@ -1,3 +1,4 @@
+# Package definition for "Sesame" — a P2P encrypted chat with deniable auth
 [package]
 name = "sesame_cli"
 version = "0.2.0"
@@ -11,29 +12,91 @@ rust-version = "1.85"
 keywords = ["p2p", "encrypted-chat", "deniable-auth", "panic-mode", "mesh"]
 categories = ["cryptography", "command-line-utilities"]
 
+# Binary output: after compiling we get an executable called "sesame"
 [[bin]]
 name = "sesame"
 path = "src/main.rs"
 
+# ─── Dependencias (librerias que usamos) ─────────────────────────────────
+#
+# Tokio: async runtime — lets us handle many connections at the same time
+# without creating one OS thread per connection. Needed because we can have
+# multiple peers connected simultaneously.
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+
+# rustls: TLS 1.3 implementation in pure Rust. We use it for encrypted
+# transport between peers (the outer layer of encryption).
 rustls = { version = "0.23", features = ["ring"] }
+
+# tokio-rustls: bridge between Tokio (async I/O) and rustls (TLS).
+# This lets us do TLS over async TCP streams.
 tokio-rustls = "0.26"
+
+# rustls-pemfile: read/write PEM files for certificates. Used to handle
+# certificate data during TLS setup.
 rustls-pemfile = "2"
+
+# rcgen: generate self-signed TLS certificates on the fly. Each time the
+# app starts, we create a fresh Ed25519 keypair and certificate.
 rcgen = "0.13"
+
+# x25519-dalek: X25519 elliptic-curve Diffie-Hellman. This is the key
+# exchange algorithm used by the Double Ratchet for ratcheting.
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+
+# chacha20poly1305: ChaCha20 stream cipher + Poly1305 authenticator.
+# This is what actually encrypts each message inside the ratchet.
 chacha20poly1305 = "0.10"
+
+# sha2: SHA-256 hashing. Used everywhere — key derivation, identity
+# generation, transcript hashing, chain ratcheting.
 sha2 = "0.10"
+
+# hkdf: HMAC-based Key Derivation Function. Turns one key into many
+# derived keys (e.g., send key, receive key, message keys).
 hkdf = "0.12"
+
+# argon2: memory-hard password hashing. Turns the passphrase into a key
+# that is expensive to brute-force (uses 64 MB of RAM by default).
 argon2 = "0.5"
+
+# rand: random number generation. Used for generating salts, nonces,
+# DH keys, and any other random values.
 rand = "0.8"
+
+# zeroize: automatically zeroes out memory when a value is dropped.
+# Prevents secrets from leaking if the memory is reallocated or dumped.
 zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# serde + serde_json: serialize/deserialize data to JSON. Chat messages,
+# config, peer lists — everything travels as JSON over the encrypted channel.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# ratatui + crossterm: terminal UI framework. Renders the chat window,
+# input box, peer list, and mode indicator in the terminal.
 ratatui = "0.28"
 crossterm = "0.28"
+
+# os-memlock: locks memory pages so they don't get swapped to disk.
+# Prevents secrets from ending up in the swap file/partition.
 os-memlock = "0.1"
+
+# libc: low-level C library bindings. Used for OS-level hardening like
+# disabling core dumps and process dumpability on Linux.
 libc = "0.2"
+
+# socket2: fine-grained socket configuration. Used to set TCP keepalive
+# options on the TCP connections.
 socket2 = "0.5"
+
+# spake2: SPAKE2 password-authenticated key exchange. This is the
+# "deniable auth" part — both sides prove they know the passphrase
+# without revealing it to each other or to eavesdroppers.
 spake2 = { version = "0.5.0-pre.0", features = ["getrandom"] }
+
+# dirs: finds platform-specific directories (config, data, cache).
+# Used to locate the config file (~/.config/sesame/ on Linux,
+# %APPDATA%/sesame/ on Windows).
 dirs = "6"
