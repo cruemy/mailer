@@ -1276,7 +1276,7 @@ FASE 6 — ASEGURAMIENTO MÁXIMO    [ ]
 
 ### Task 1 — Threat model formal + límites explícitos
 
-**Archivo:** `docs/SECURITY.md`, `plans/sesame-mvp-plan.md`
+**Archivo:** `docs/SECURITY.md`, `plans/Genesis.md`
 
 **Estado:** Implementado en `docs/SECURITY.md`. Mantener este archivo como fuente de verdad para garantías, límites, operación segura y criterios de producción.
 
