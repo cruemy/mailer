@@ -40,9 +40,8 @@ where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    let jh = tokio::spawn(f());
     tokio::spawn(async move {
-        if let Err(e) = jh.await {
+        if let Err(e) = tokio::spawn(f()).await {
             eprintln!("[sesame] task '{name}' panicked: {e:?}");
         }
     });
@@ -206,7 +205,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let display_name = if let Some(ref name) = cli_display_name {
         eprintln!("[sesame] setting display name to '{name}' at {}",
             config::config_path().display());
-        config::set_display_name(name).display_name
+        match config::set_display_name(name) {
+            Ok(cfg) => cfg.display_name,
+            Err(e) => {
+                eprintln!("[sesame] warning: could not save display name: {e}");
+                Some(name.clone())
+            }
+        }
     } else {
         let cfg = config::load_config();
         if let Some(ref name) = cfg.display_name {
@@ -368,12 +373,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // 1. Evento de teclado (event_rx) -> handle_event()
     //    - Esc: sale del programa (quit = true)
-    //    - F12: panic (identity rotation, limpia todo)
+    //    - F12: panic shutdown completo del proceso
     //
     // 2. Peer descubierto (discovery_rx) -> intentar conectar
     //
     // 3. Mensaje entrante (msg_rx) -> segun flags:
-    //    - FLAG_SYSTEM_ALONE: regenerar identidad TLS (panic)
+    //    - FLAG_SYSTEM_ALONE: panic shutdown completo del proceso
     //    - FLAG_SYSTEM_INFO: mostrar en TUI
     //    - FLAG_SYSTEM_DISPLAY_NAME: actualizar nombre del peer
     //    - FLAG_SYSTEM_GOODBYE: desconectar peer (no reconectar)
@@ -394,8 +399,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // F12 -> panic shutdown
                         if tui_state.panic_requested {
                             session_mgr.panic_shutdown();
-                            tui_state.clear_messages();
-                            break Ok(());
+                            let _ = tui::restore_terminal();
+                            std::process::exit(0);
                         }
                         // Esc -> salir (enviar GOODBYE si hay peers)
                         if tui_state.quit {
@@ -442,22 +447,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some((_peer_id, msg)) => {
                         match msg.flags {
                             FLAG_SYSTEM_ALONE => {
-                                // Regenerar identidad TLS completa
-                                let (certs, key) = tls::generate_cert()?;
-                                let new_id = PeerId::from_cert_der(certs[0].as_ref());
-                                let kc = key.clone_key();
-                                let server_config = tls::make_server_config(certs.clone(), key)?;
-                                let client_config = tls::make_client_config(certs, kc)?;
-                                let new_acceptor = TlsAcceptor::from(server_config);
-                                let new_connector = TlsConnector::from(client_config);
-                                 *shared_acceptor.lock().expect("acceptor poisoned") = new_acceptor;
-                                 *shared_connector.lock().expect("connector poisoned") = new_connector;
-                                 session_mgr.clear_sessions();
-                                 session_mgr.clear_known_peers();
-                                 session_mgr.set_my_peer_id(new_id);
-                                 tui_state.my_id = new_id;
-                                tui_state.clear_messages();
-                                tui_state.add_message(new_id, "[new identity — waiting for connections]".to_string(), 0);
+                                session_mgr.panic_shutdown();
+                                let _ = tui::restore_terminal();
+                                std::process::exit(0);
                             }
                             FLAG_SYSTEM_INFO => {
                                 tui_state.add_message(msg.peer_id, msg.text, msg.flags);

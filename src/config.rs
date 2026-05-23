@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::io::Write;
 use std::path::PathBuf;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -24,6 +26,21 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Default)]
 pub struct Config {
     pub display_name: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Io(String),
+    Json(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::Io(e) => write!(f, "I/O error: {e}"),
+            ConfigError::Json(e) => write!(f, "JSON error: {e}"),
+        }
+    }
 }
 
 /// Devuelve la ruta al archivo de configuracion.
@@ -80,26 +97,21 @@ pub fn load_config() -> Config {
 /// 2. Serializa `Config` a JSON pretty-printed
 /// 3. Escribe al archivo
 ///
-/// Cada paso reporta errores pero no detiene el programa. Si la
-/// escritura falla (ej: permisos), mostramos un warning y seguimos.
-pub fn save_config(config: &Config) {
+/// Cada paso devuelve error al caller. La configuracion no es critica,
+/// pero quien llama decide como advertir al usuario.
+pub fn save_config(config: &Config) -> Result<(), ConfigError> {
     let path = config_path();
     if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("[sesame] config: could not create {}: {e}", parent.display());
-            return;
-        }
+        std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io(e.to_string()))?;
     }
-    let data = match serde_json::to_string_pretty(config) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("[sesame] config: serialization error: {e}");
-            return;
-        }
-    };
-    if let Err(e) = std::fs::write(&path, &data) {
-        eprintln!("[sesame] config: could not write {}: {e}", path.display());
-    }
+    let data =
+        serde_json::to_string_pretty(config).map_err(|e| ConfigError::Json(e.to_string()))?;
+    let mut file = std::fs::File::create(&path).map_err(|e| ConfigError::Io(e.to_string()))?;
+    file.write_all(data.as_bytes())
+        .map_err(|e| ConfigError::Io(e.to_string()))?;
+    file.sync_all()
+        .map_err(|e| ConfigError::Io(e.to_string()))?;
+    Ok(())
 }
 
 /// Establece el display name, lo guarda en disco, y devuelve el Config actualizado.
@@ -115,9 +127,9 @@ pub fn save_config(config: &Config) {
 ///
 /// Devuelve
 /// El Config completo con el display name ya seteado.
-pub fn set_display_name(name: &str) -> Config {
+pub fn set_display_name(name: &str) -> Result<Config, ConfigError> {
     let mut config = load_config();
     config.display_name = Some(name.to_string());
-    save_config(&config);
-    config
+    save_config(&config)?;
+    Ok(config)
 }
