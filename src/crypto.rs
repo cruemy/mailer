@@ -1,7 +1,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
-use sha2::Sha256;
 use sha2::Digest;
+use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
@@ -204,7 +204,11 @@ impl LockedDhSecret {
 ///
 /// Estos valores son un balance entre seguridad (costo para atacante)
 /// y velocidad (el usuario espera 1-2 segundos al conectar).
-pub fn derive_key(phrase: &[u8], salt_a: &[u8; 32], salt_b: &[u8; 32]) -> Result<LockedKey, String> {
+pub fn derive_key(
+    phrase: &[u8],
+    salt_a: &[u8; 32],
+    salt_b: &[u8; 32],
+) -> Result<LockedKey, String> {
     let combined_salt = {
         let mut s = [0u8; 64];
         if salt_a < salt_b {
@@ -324,9 +328,7 @@ pub fn try_mlock(data: &[u8]) -> bool {
     let ptr = data.as_ptr() as *const std::ffi::c_void;
     match unsafe { os_memlock::mlock(ptr, data.len()) } {
         Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-            false
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => false,
         Err(e) => {
             eprintln!("[sesame] mlock failed: {e}");
             false

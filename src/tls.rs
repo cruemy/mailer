@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
+use rustls::client::danger::HandshakeSignatureValid;
 use rustls::client::danger::ServerCertVerifier;
-use rustls::crypto::{ring, WebPkiSupportedAlgorithms};
+use rustls::crypto::{WebPkiSupportedAlgorithms, ring};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::client::danger::HandshakeSignatureValid;
 use rustls::{
     ClientConfig, DigitallySignedStruct, DistinguishedName, Error, ServerConfig, SignatureScheme,
 };
@@ -162,7 +162,8 @@ impl ServerCertVerifier for AcceptAllServerVerifier {
 /// Para que el PeerId cambie cada vez. Esto es deliberado:
 /// si regeneras tu identidad (con F12), los peers anteriores no
 /// pueden rastrearte. Es una propiedad de privacidad/fisica.
-pub fn generate_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Box<dyn std::error::Error>> {
+pub fn generate_cert()
+-> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Box<dyn std::error::Error>> {
     let key_pair = KeyPair::generate_for(&PKCS_ED25519)?;
     let params = CertificateParams::new(vec!["sesame.local".to_string()])?;
     let cert = params.self_signed(&key_pair)?;

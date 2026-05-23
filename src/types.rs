@@ -232,6 +232,8 @@ impl PanicMode {
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
     pub peer_id: PeerId,
+    // Conservado para logs/debug futuros de peers en la UI.
+    #[allow(dead_code)]
     pub peer_addr: PeerAddr,
     #[allow(dead_code)]
     pub connected_since: Instant,

@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 
-use crate::crypto::{derive_key, sha256_many, LockedKey};
+use crate::crypto::{LockedKey, derive_key, sha256_many};
 use crate::types::PeerId;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -249,7 +249,9 @@ async fn perform_pake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             );
             write_pake_msg(stream, outbound.as_slice()).await?;
             let inbound = read_pake_msg(stream).await?;
-            state.finish(&inbound).map_err(|e| format!("PAKE failed: {e:?}"))?
+            state
+                .finish(&inbound)
+                .map_err(|e| format!("PAKE failed: {e:?}"))?
         }
         AuthRole::Responder => {
             // start_b() = soy el responder B
@@ -260,7 +262,9 @@ async fn perform_pake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 &responder_identity,
             );
             write_pake_msg(stream, outbound.as_slice()).await?;
-            state.finish(&inbound).map_err(|e| format!("PAKE failed: {e:?}"))?
+            state
+                .finish(&inbound)
+                .map_err(|e| format!("PAKE failed: {e:?}"))?
         }
     };
 
@@ -275,11 +279,13 @@ async fn perform_pake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 /// Porque el stream es un flujo continuo de bytes. Sin saber donde
 /// termina un mensaje y empieza el otro, no podriamos separarlos.
 /// Con 2 bytes de longitud tenemos hasta 65535 bytes por mensaje PAKE.
-async fn write_pake_msg<S: AsyncWriteExt + Unpin>(stream: &mut S, msg: &[u8]) -> std::io::Result<()> {
-    let len: u16 = msg
-        .len()
-        .try_into()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "PAKE message too large"))?;
+async fn write_pake_msg<S: AsyncWriteExt + Unpin>(
+    stream: &mut S,
+    msg: &[u8],
+) -> std::io::Result<()> {
+    let len: u16 = msg.len().try_into().map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "PAKE message too large")
+    })?;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(msg).await
 }
