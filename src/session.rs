@@ -3,10 +3,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::crypto::LockedBytes;
-use crate::types::{ChatMessage, PeerAddr, PeerId, SessionInfo, FLAG_SYSTEM_ALONE, FLAG_SYSTEM_INFO};
+use crate::types::{
+    ChatMessage, FLAG_SYSTEM_ALONE, FLAG_SYSTEM_INFO, PeerAddr, PeerId, SessionInfo,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GESTION DE SESIONES ENTRE PEERS
@@ -52,7 +54,7 @@ pub struct SessionHandle {
 /// 3. Hacer broadcast de mensajes a todos (o todos excepto uno)
 /// 4. Nombrar peers con display names
 /// 5. Detectar peers inactivos y cerrar sus sesiones (timeout)
-/// 6. Coordinar el shutdown por panico (identity rotation)
+/// 6. Coordinar el shutdown por panico
 /// 7. Proveer la frase de paso a los handshakes
 ///
 /// Thread safety
@@ -131,24 +133,29 @@ impl SessionManager {
         *self.my_peer_id.lock().expect("my_peer_id poisoned")
     }
 
-    /// Cambia nuestro PeerId (se usa despues de panic/identity rotation).
-    pub fn set_my_peer_id(&self, peer_id: PeerId) {
-        *self.my_peer_id.lock().expect("my_peer_id poisoned") = peer_id;
-    }
-
     /// Devuelve nuestro display name (si tenemos uno).
     pub fn my_display_name(&self) -> Option<String> {
-        self.my_display_name.lock().expect("my_display_name poisoned").clone()
+        self.my_display_name
+            .lock()
+            .expect("my_display_name poisoned")
+            .clone()
     }
 
     /// Guarda el display name de un peer (para mostrarlo en la UI en vez del PeerId).
     pub fn set_display_name(&self, peer_id: PeerId, name: String) {
-        self.display_names.lock().expect("display_names poisoned").insert(peer_id, name);
+        self.display_names
+            .lock()
+            .expect("display_names poisoned")
+            .insert(peer_id, name);
     }
 
     /// Obtiene el display name de un peer, si lo tiene.
     pub fn get_display_name(&self, peer_id: &PeerId) -> Option<String> {
-        self.display_names.lock().expect("display_names poisoned").get(peer_id).cloned()
+        self.display_names
+            .lock()
+            .expect("display_names poisoned")
+            .get(peer_id)
+            .cloned()
     }
 
     /// Registra una nueva sesion de peer.
@@ -213,7 +220,10 @@ impl SessionManager {
         if let Some(handle) = removed {
             handle.cancel_notify.notify_one();
             let addr = handle.peer_addr;
-            self.known_peers.lock().expect("known_peers poisoned").insert(*peer_id, addr);
+            self.known_peers
+                .lock()
+                .expect("known_peers poisoned")
+                .insert(*peer_id, addr);
             let msg = ChatMessage {
                 peer_id: *peer_id,
                 text: format!("connection lost, reconnecting to {peer_id}..."),
@@ -236,43 +246,25 @@ impl SessionManager {
         };
         if let Some(handle) = removed {
             handle.cancel_notify.notify_one();
-            self.known_peers.lock().expect("known_peers poisoned").remove(peer_id);
-        }
-    }
-
-    /// Limpia TODAS las sesiones y known_peers.
-    ///
-    /// Se usa despues de panic/identity rotation. Todos los peers
-    /// quedan desconectados y no se reconecta a nadie (se limpia
-    /// known_peers tambien).
-    ///
-    /// Si habia sesiones activas, envia FLAG_SYSTEM_ALONE al
-    /// loop de mensajes para que regeneremos identidad TLS.
-    pub fn clear_sessions(&self) {
-        let mut handles: Vec<SessionHandle> = {
-            let mut sessions = self.sessions.lock().expect("sessions poisoned");
-            sessions.drain().map(|(_, h)| h).collect()
-        };
-        let had_sessions = !handles.is_empty();
-        for h in &handles {
-            h.cancel_notify.notify_one();
-        }
-        handles.clear();
-        self.known_peers.lock().expect("known_peers poisoned").clear();
-        if had_sessions {
-            let msg = ChatMessage {
-                peer_id: self.my_peer_id(),
-                text: String::new(),
-                timestamp: 0,
-                flags: FLAG_SYSTEM_ALONE,
-            };
-            let _ = self.message_tx.try_send((self.my_peer_id(), msg));
+            self.known_peers
+                .lock()
+                .expect("known_peers poisoned")
+                .remove(peer_id);
         }
     }
 
     /// Apagon de emergencia (F12). Envia senal de cancelacion a
     /// TODOS los loops de peer y limpia todo.
     pub fn panic_shutdown(&self) {
+        let panic_msg = ChatMessage {
+            peer_id: self.my_peer_id(),
+            text: String::new(),
+            timestamp: 0,
+            flags: FLAG_SYSTEM_ALONE,
+        };
+        if let Ok(data) = serde_json::to_vec(&panic_msg) {
+            self.broadcast(&data);
+        }
         let _ = self.cancel_tx.send(true);
         let handles: Vec<SessionHandle> = {
             let mut sessions = self.sessions.lock().expect("sessions poisoned");
@@ -282,7 +274,10 @@ impl SessionManager {
             h.cancel_notify.notify_one();
         }
         drop(handles);
-        self.known_peers.lock().expect("known_peers poisoned").clear();
+        self.known_peers
+            .lock()
+            .expect("known_peers poisoned")
+            .clear();
     }
 
     /// Obtiene el canal de envio de un peer especifico.
@@ -388,11 +383,6 @@ impl SessionManager {
             .collect()
     }
 
-    /// Limpia la lista de peers conocidos.
-    pub fn clear_known_peers(&self) {
-        self.known_peers.lock().expect("known_peers poisoned").clear();
-    }
-
     /// Configura el canal de descubrimiento de peers.
     ///
     /// Cuando recibimos una respuesta PEER_LIST_RES con direcciones
@@ -445,7 +435,9 @@ impl SessionManager {
                     let sessions = this.sessions.lock().expect("sessions poisoned");
                     sessions
                         .iter()
-                        .filter(|(_, h)| now.duration_since(h.last_message) > this.inactivity_timeout)
+                        .filter(|(_, h)| {
+                            now.duration_since(h.last_message) > this.inactivity_timeout
+                        })
                         .map(|(id, _)| *id)
                         .collect()
                 };
@@ -461,8 +453,47 @@ impl SessionManager {
     /// Se llama cada vez que recibimos un mensaje valido de ese peer
     /// para evitar que el timeout checker lo desconecte.
     pub fn update_last_message(&self, peer_id: &PeerId) {
-        if let Some(handle) = self.sessions.lock().expect("sessions poisoned").get_mut(peer_id) {
+        if let Some(handle) = self
+            .sessions
+            .lock()
+            .expect("sessions poisoned")
+            .get_mut(peer_id)
+        {
             handle.last_message = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_manager() -> SessionManager {
+        let (message_tx, _message_rx) = mpsc::channel(8);
+        SessionManager::new(
+            LockedBytes::new(b"phrase".to_vec()),
+            message_tx,
+            Duration::from_secs(300),
+            PeerAddr {
+                ip: "127.0.0.1".parse().expect("valid ip"),
+                port: 4444,
+            },
+            PeerId([1u8; 32]),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn panic_shutdown_sets_global_cancel_signal() {
+        let manager = test_manager();
+        let mut cancel_rx = manager.cancel_rx();
+
+        manager.panic_shutdown();
+
+        cancel_rx
+            .changed()
+            .await
+            .expect("cancel sender still alive");
+        assert!(*cancel_rx.borrow());
     }
 }

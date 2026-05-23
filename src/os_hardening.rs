@@ -17,6 +17,7 @@
 pub fn apply_process_hardening() {
     disable_core_dumps();
     disable_ptrace_dumping();
+    check_mlock_limit();
 }
 
 /// Desactiva los core dumps usando setrlimit.
@@ -72,5 +73,50 @@ fn disable_ptrace_dumping() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// En macOS, `PT_DENY_ATTACH` evita que otros procesos se adjunten con
+/// un debugger al proceso actual.
+#[cfg(target_os = "macos")]
+fn disable_ptrace_dumping() {
+    let rc = unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, 0, 0) };
+    if rc != 0 {
+        eprintln!("[sesame] warning: failed to deny debugger attach on macOS");
+    }
+}
+
+/// Windows no ofrece una API simple y portable dentro del proceso para
+/// desactivar core dumps. Ese endurecimiento depende de configuracion
+/// externa (WER, Group Policy, políticas de crash dump o controles del
+/// sistema). Se deja como stub para documentar la limitacion sin fallar.
+#[cfg(windows)]
 fn disable_ptrace_dumping() {}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn disable_ptrace_dumping() {}
+
+/// Verifica si el limite de memoria bloqueada es razonable para secretos.
+///
+/// Si el limite es bajo, no abortamos: solo advertimos porque el sistema
+/// operativo o el contenedor pueden imponer restricciones externas.
+#[cfg(unix)]
+fn check_mlock_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
+    if rc != 0 {
+        eprintln!("[sesame] warning: failed to read RLIMIT_MEMLOCK");
+        return;
+    }
+
+    if limit.rlim_cur < 4096 {
+        eprintln!(
+            "[sesame] warning: RLIMIT_MEMLOCK is low ({} bytes); locked secrets may fail on this system",
+            limit.rlim_cur
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn check_mlock_limit() {}

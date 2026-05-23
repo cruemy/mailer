@@ -10,7 +10,7 @@ Sesame aims for high-assurance ephemeral private chat between peers who already 
 - forward secrecy and post-compromise recovery where the ratchet permits it;
 - no server-side trust anchor;
 - minimal persistence;
-- rapid local shutdown through F12;
+ - rapid local shutdown through F12 (terminates the process immediately);
 - reduced metadata leakage through padding and dummy traffic;
 - explicit limits instead of implicit “secure by default” claims.
 
@@ -25,7 +25,7 @@ Sesame is designed to defend against:
 - peers that know IP:port but do not know the shared phrase;
 - malformed network input attempting panics, OOM, or unbounded CPU/memory use;
 - post-session disk/swap/core-dump recovery of key material, within OS limits;
-- accidental task leaks after panic shutdown;
+ - accidental task leaks after panic shutdown (all Tokio tasks are aborted on F12);
 - transcript rebinding between different peers, roles, or sessions.
 
 ## Partially in scope
@@ -62,22 +62,30 @@ The implementation should maintain these properties:
 | Phrase authentication | Argon2id-hardened SPAKE2 + transcript-bound challenge response | Prevents practical offline verification of captured phrase guesses. |
 | E2EE message encryption | X25519-derived ratchet + ChaCha20-Poly1305 | Ratchet state is independent per peer. |
 | Basic memory hardening | `LockedBytes`/`LockedKey`/`LockedDhSecret` + `mlock` + `zeroize` | Covers phrase bytes, 32-byte session/ratchet keys, and DH private keys. |
-| Panic shutdown | F12 requests session cancellation and app exit | F12 does not switch mode or reconnect. |
+| Panic shutdown | F12 requests session cancellation and app exit | F12 terminates the process immediately with `exit(0)`. No identity rotation, no reconnect. |
 | Frame allocation limit | `MAX_FRAME_SIZE` | Malformed frame input must fail closed. |
 | JSON allocation limit | `MAX_JSON_SIZE` | Applies before deserialization. |
+
+### Platform hardening
+
+| Platform | Core dump hardening | Debugger attach hardening | Memory-lock check |
+|---|---|---|---|
+| Linux | `setrlimit(RLIMIT_CORE=0)` | `prctl(PR_SET_DUMPABLE=0)` | Warn if `RLIMIT_MEMLOCK < 4096` bytes. |
+| macOS | `setrlimit(RLIMIT_CORE=0)` | `ptrace(PT_DENY_ATTACH, 0, 0, 0)` | Warn if `RLIMIT_MEMLOCK < 4096` bytes. |
+| Windows | No in-process portable core-dump disable; use WER / Group Policy / external crash-dump policy. | No simple `ptrace` equivalent in this code path; stubbed intentionally. | No `RLIMIT_MEMLOCK`; use platform-specific working-set / policy controls externally. |
 
 ## Known gaps before production
 
 These are not optional for a production security claim:
 
 1. **External cryptographic review**
-   - Sesame uses a custom protocol composition. It must not be marketed as production-secure before external review of the protocol and implementation.
+   - Sesame uses a custom protocol composition. It must not be marketed as production-secure before external review of the protocol and implementation. See [`docs/AUDIT.md`](docs/AUDIT.md) for the current audit scope and release gate.
 
 2. **Continuous fuzzing/integration CI**
-   - Unit-level adversarial tests exist, but long-running fuzzing and multi-process peer integration must run in CI before release.
+   - Unit-level adversarial tests and property tests exist, but long-running fuzzing and multi-process peer integration must run in CI before release.
 
 3. **Platform hardening parity**
-   - Linux core dumps/process dumpability are handled; Windows/macOS equivalent controls must be implemented or documented as reduced guarantees.
+   - Linux and macOS have core-dump and debugger-attach mitigations. Windows hardening is documented as external-policy driven (WER / Group Policy) with no in-process portable equivalent in this release.
 
 ## Operational requirements
 
@@ -88,8 +96,8 @@ For safest operation:
 - run on a system with swap disabled or with sufficient `mlock` limits;
 - avoid debug logging in real sessions;
 - avoid clipboard usage for secrets;
-- press F12 to terminate immediately under pressure;
-- restart the app to enter real or decoy mode; F12 never switches mode in-process.
+ - press F12 to terminate immediately under pressure (F12 ends the process, it does not rotate identity);
+ - restart the app to enter real or decoy mode; F12 never switches mode in-process.
 
 ## Failure policy
 
@@ -109,7 +117,7 @@ Security-sensitive code must fail closed:
 
 Sesame can only claim production-ready security when all are true:
 
-- `docs/SECURITY.md` and `plans/sesame-mvp-plan.md` agree on guarantees and limits;
+- `docs/SECURITY.md` and `plans/Genesis.md` agree on guarantees and limits;
 - PAKE replaces offline-verifiable phrase authentication;
 - phrase, session keys, ratchet chains, skipped keys, message keys, and DH private keys use locked/zeroized ownership or equivalent library guarantees;
 - TLS exporter and full transcript binding are enforced;
