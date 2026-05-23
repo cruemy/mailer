@@ -228,7 +228,7 @@ impl DoubleRatchet {
 
         let mut ciphertext = plaintext.to_vec();
         let tag = cipher
-            .encrypt_in_place_detached(&Nonce::from_slice(&nonce), &aad, &mut ciphertext)
+            .encrypt_in_place_detached(Nonce::from_slice(&nonce), &aad, &mut ciphertext)
             .expect("ChaCha20Poly1305 encryption failed");
 
         EncryptedFrame {
@@ -297,7 +297,7 @@ impl DoubleRatchet {
         );
         cipher
             .decrypt_in_place_detached(
-                &Nonce::from_slice(&frame.nonce),
+                Nonce::from_slice(&frame.nonce),
                 &aad,
                 &mut plaintext,
                 &frame.tag.into(),

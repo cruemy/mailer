@@ -24,7 +24,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// - Header TCP (20 bytes)
 /// - Header TLS (variable, ~50 bytes)
 /// - Header de nuestro frame (4 bytes de longitud + 2 de padding)
-/// Con 1400 nos aseguramos que quepa todo sin fragmentar.
+///   Con 1400 nos aseguramos que quepa todo sin fragmentar.
 pub const PADDING_BLOCK: usize = 1400;
 
 /// Tamaño maximo de un frame entrante (10 MB).
@@ -120,7 +120,7 @@ pub fn apply_padding(payload: &[u8]) -> Vec<u8> {
         "payload too large for padding header"
     );
     let frame_len = payload_len + 2;
-    let total_padded = ((frame_len + PADDING_BLOCK - 1) / PADDING_BLOCK) * PADDING_BLOCK;
+    let total_padded = frame_len.div_ceil(PADDING_BLOCK) * PADDING_BLOCK;
     let padded_len = std::cmp::max(PADDING_BLOCK, total_padded);
 
     let mut frame = Vec::with_capacity(padded_len);

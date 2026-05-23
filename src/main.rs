@@ -428,16 +428,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // ── Branch 2: Peer descubierto ──────────────────────────
             maybe_addr = discovery_rx.recv() => {
-                match maybe_addr {
-                    Some(addr) => {
-                        let cn = shared_connector.lock().expect("connector poisoned").clone();
-                        let sm = session_mgr.clone();
-                        let a = addr;
-                        tokio::spawn(async move {
-                            peer::connect_peer(a, sm, cn).await;
-                        });
-                    }
-                    None => {}
+                if let Some(addr) = maybe_addr {
+                    let cn = shared_connector.lock().expect("connector poisoned").clone();
+                    let sm = session_mgr.clone();
+                    let a = addr;
+                    tokio::spawn(async move {
+                        peer::connect_peer(a, sm, cn).await;
+                    });
                 }
             }
 

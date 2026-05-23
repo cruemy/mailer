@@ -331,6 +331,7 @@ async fn read_pake_msg<S: AsyncReadExt + Unpin>(stream: &mut S) -> std::io::Resu
 ///
 /// Devuelve
 /// 32 bytes: SHA-256 de todos los parametros en orden canonico.
+#[allow(clippy::too_many_arguments)]
 fn auth_proof(
     session_key: &[u8; 32],
     direction: &[u8],

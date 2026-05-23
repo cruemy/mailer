@@ -65,15 +65,12 @@ impl TestPeer {
                 let acceptor = acceptor.clone();
                 let session_mgr = listener_mgr.clone();
                 tokio::spawn(async move {
-                    match acceptor.accept(stream).await {
-                        Ok(tls_stream) => {
-                            let peer_addr = PeerAddr {
-                                ip: socket_addr.ip(),
-                                port: socket_addr.port(),
-                            };
-                            peer::handle_incoming(tls_stream, peer_addr, session_mgr).await;
-                        }
-                        Err(_) => {}
+                    if let Ok(tls_stream) = acceptor.accept(stream).await {
+                        let peer_addr = PeerAddr {
+                            ip: socket_addr.ip(),
+                            port: socket_addr.port(),
+                        };
+                        peer::handle_incoming(tls_stream, peer_addr, session_mgr).await;
                     }
                 });
             }

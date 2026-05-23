@@ -138,10 +138,11 @@ impl TuiState {
                         self.add_message(self.my_id, text, FLAG_REAL);
                     }
                 }
-                KeyCode::Char(c) => {
-                    if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT {
-                        self.input.push(c);
-                    }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    self.input.push(c);
                 }
                 KeyCode::Backspace => {
                     self.input.pop();
@@ -227,13 +228,13 @@ impl TuiState {
             .map(|(peer_id, text, flags)| {
                 let (prefix, style) = match *flags {
                     FLAG_SYSTEM_JOIN | FLAG_SYSTEM_LEAVE => (
-                        format!(" ◆ "),
+                        " ◆ ".to_string(),
                         Style::default()
                             .fg(Color::Gray)
                             .add_modifier(Modifier::ITALIC),
                     ),
                     FLAG_SYSTEM_INFO => (
-                        format!(" ! "),
+                        " ! ".to_string(),
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ),
                     _ if *peer_id == self.my_id => {
