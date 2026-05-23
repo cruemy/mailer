@@ -100,3 +100,6 @@ spake2 = { version = "0.5.0-pre.0", features = ["getrandom"] }
 # Used to locate the config file (~/.config/sesame/ on Linux,
 # %APPDATA%/sesame/ on Windows).
 dirs = "6"
+
+[dev-dependencies]
+proptest = "1"

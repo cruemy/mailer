@@ -115,7 +115,10 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 /// Un Vec<u8> con el padding ya aplicado.
 pub fn apply_padding(payload: &[u8]) -> Vec<u8> {
     let payload_len = payload.len();
-    assert!(payload_len <= u16::MAX as usize, "payload too large for padding header");
+    assert!(
+        payload_len <= u16::MAX as usize,
+        "payload too large for padding header"
+    );
     let frame_len = payload_len + 2;
     let total_padded = ((frame_len + PADDING_BLOCK - 1) / PADDING_BLOCK) * PADDING_BLOCK;
     let padded_len = std::cmp::max(PADDING_BLOCK, total_padded);
@@ -184,5 +187,20 @@ mod tests {
     fn padding_rejects_truncated_payload() {
         let frame = [0, 10, 1, 2, 3];
         assert!(remove_padding(&frame).is_err());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn padding_roundtrip_any_payload(payload in proptest::collection::vec(any::<u8>(), 0..10000)) {
+            let padded = apply_padding(&payload);
+            let recovered = remove_padding(&padded).unwrap();
+            prop_assert_eq!(recovered, &payload[..]);
+        }
     }
 }

@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use x25519_dalek::PublicKey;
 use zeroize::Zeroize;
 
-use crate::crypto::{hkdf_derive, LockedDhSecret, LockedKey};
+use crate::crypto::{LockedDhSecret, LockedKey, hkdf_derive};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DOUBLE RATCHET (ALGORITMO DE CIFRADO POR SESION)
@@ -152,9 +152,15 @@ impl DoubleRatchet {
         max_skip: usize,
     ) -> Self {
         let (send_chain, recv_chain) = if initiator {
-            (hkdf_derive(root_key, b"sesame-send"), hkdf_derive(root_key, b"sesame-recv"))
+            (
+                hkdf_derive(root_key, b"sesame-send"),
+                hkdf_derive(root_key, b"sesame-recv"),
+            )
         } else {
-            (hkdf_derive(root_key, b"sesame-recv"), hkdf_derive(root_key, b"sesame-send"))
+            (
+                hkdf_derive(root_key, b"sesame-recv"),
+                hkdf_derive(root_key, b"sesame-send"),
+            )
         };
 
         Self {
@@ -210,7 +216,8 @@ impl DoubleRatchet {
 
         // Derivamos la message key de la send_chain y avanzamos la cadena
         let msg_key = hkdf_derive(self.send_chain.as_bytes(), b"sesame-msg");
-        self.send_chain.replace(Sha256::digest(self.send_chain.as_bytes()).into());
+        self.send_chain
+            .replace(Sha256::digest(self.send_chain.as_bytes()).into());
         self.msg_number_send += 1;
         self.dh_counter += 1;
 
@@ -253,11 +260,21 @@ impl DoubleRatchet {
     /// - Replay attack (mismo dh_epoch + msg_number ya visto)
     /// - Mensaje muy futuro (salto muy grande en msg_number)
     /// - Falla de autenticacion Poly1305 (tampering o clave incorrecta)
-    pub fn decrypt(&mut self, frame: &ReceivedFrame, aad_prefix: &[u8]) -> Result<Vec<u8>, &'static str> {
-        if frame.dh_epoch < self.dh_epoch || self.seen_messages.contains(&(frame.dh_epoch, frame.msg_number)) {
+    pub fn decrypt(
+        &mut self,
+        frame: &ReceivedFrame,
+        aad_prefix: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        if frame.dh_epoch < self.dh_epoch
+            || self
+                .seen_messages
+                .contains(&(frame.dh_epoch, frame.msg_number))
+        {
             return Err("replay or stale message");
         }
-        if frame.dh_epoch > self.dh_epoch + 1 || frame.msg_number > self.msg_number_recv + self.max_skip as u64 {
+        if frame.dh_epoch > self.dh_epoch + 1
+            || frame.msg_number > self.msg_number_recv + self.max_skip as u64
+        {
             return Err("message too far in the future");
         }
 
@@ -266,12 +283,18 @@ impl DoubleRatchet {
         }
 
         let msg_key = hkdf_derive(self.recv_chain.as_bytes(), b"sesame-msg");
-        self.recv_chain.replace(Sha256::digest(self.recv_chain.as_bytes()).into());
+        self.recv_chain
+            .replace(Sha256::digest(self.recv_chain.as_bytes()).into());
         self.msg_number_recv += 1;
 
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&msg_key));
         let mut plaintext = frame.ciphertext.clone();
-        let aad = frame_aad(aad_prefix, frame.msg_number, frame.dh_epoch, frame.dh_public_key.is_some());
+        let aad = frame_aad(
+            aad_prefix,
+            frame.msg_number,
+            frame.dh_epoch,
+            frame.dh_public_key.is_some(),
+        );
         cipher
             .decrypt_in_place_detached(
                 &Nonce::from_slice(&frame.nonce),
@@ -281,7 +304,8 @@ impl DoubleRatchet {
             )
             .map_err(|_| "decryption failed")?;
 
-        self.seen_messages.insert((frame.dh_epoch, frame.msg_number));
+        self.seen_messages
+            .insert((frame.dh_epoch, frame.msg_number));
 
         Ok(plaintext)
     }
@@ -429,14 +453,21 @@ mod tests {
         let (mut sender, mut receiver) = ratchet_pair();
         let frame = sender.encrypt(b"hello", b"aad-a");
 
-        assert!(receiver.decrypt(&ReceivedFrame {
-            nonce: frame.nonce,
-            msg_number: frame.msg_number,
-            dh_epoch: frame.dh_epoch,
-            ciphertext: frame.ciphertext,
-            tag: frame.tag,
-            dh_public_key: frame.dh_public_key,
-        }, b"aad-b").is_err());
+        assert!(
+            receiver
+                .decrypt(
+                    &ReceivedFrame {
+                        nonce: frame.nonce,
+                        msg_number: frame.msg_number,
+                        dh_epoch: frame.dh_epoch,
+                        ciphertext: frame.ciphertext,
+                        tag: frame.tag,
+                        dh_public_key: frame.dh_public_key,
+                    },
+                    b"aad-b"
+                )
+                .is_err()
+        );
     }
 
     /// Verifica que el mismo mensaje no se puede descifrar dos veces
@@ -458,5 +489,43 @@ mod tests {
         assert_eq!(receiver.decrypt(&received, b"aad").unwrap(), b"hello");
         // Segunda vez: debe fallar (replay detected)
         assert!(receiver.decrypt(&received, b"aad").is_err());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn ratchet_pair() -> (DoubleRatchet, DoubleRatchet) {
+        let root = [7u8; 32];
+        let a_secret = LockedDhSecret::generate();
+        let a_public = a_secret.public_key();
+        let b_secret = LockedDhSecret::generate();
+        let b_public = b_secret.public_key();
+        (
+            DoubleRatchet::new(&root, a_secret, a_public, Some(b_public), true, 100),
+            DoubleRatchet::new(&root, b_secret, b_public, Some(a_public), false, 100),
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn decrypt_rejects_modified_ciphertext(payload in proptest::collection::vec(any::<u8>(), 1..10000)) {
+            let (mut sender, mut receiver) = ratchet_pair();
+            let mut frame = sender.encrypt(&payload, b"aad");
+            frame.ciphertext[0] ^= 1;
+
+            let received = ReceivedFrame {
+                nonce: frame.nonce,
+                msg_number: frame.msg_number,
+                dh_epoch: frame.dh_epoch,
+                ciphertext: frame.ciphertext,
+                tag: frame.tag,
+                dh_public_key: frame.dh_public_key,
+            };
+
+            prop_assert!(receiver.decrypt(&received, b"aad").is_err());
+        }
     }
 }

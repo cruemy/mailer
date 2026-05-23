@@ -3,18 +3,18 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use x25519_dalek::PublicKey;
 use zeroize::Zeroize;
 
-use crate::auth::{perform_handshake, AuthRole};
+use crate::auth::{AuthRole, perform_handshake};
 use crate::crypto::LockedDhSecret;
 use crate::protocol::{apply_padding, read_frame, remove_padding, write_frame};
 use crate::ratchet::{DoubleRatchet, ReceivedFrame};
 use crate::session::SessionManager;
 use crate::types::{
-    ChatMessage, PeerAddr, PeerId, FLAG_DUMMY, FLAG_PEER_LIST_REQ, FLAG_PEER_LIST_RES,
-    FLAG_REAL, FLAG_SYSTEM_DISPLAY_NAME, FLAG_SYSTEM_JOIN, FLAG_SYSTEM_LEAVE,
+    ChatMessage, FLAG_DUMMY, FLAG_PEER_LIST_REQ, FLAG_PEER_LIST_RES, FLAG_REAL, FLAG_SYSTEM_ALONE,
+    FLAG_SYSTEM_DISPLAY_NAME, FLAG_SYSTEM_JOIN, FLAG_SYSTEM_LEAVE, PeerAddr, PeerId,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -69,7 +69,7 @@ fn handshake_limiter() -> &'static Semaphore {
 /// Convierte un EncryptedFrame a bytes listos para enviar.
 ///
 /// Formato
-/// ```
+    /// ```text
 /// Byte 0:     version (FRAME_VERSION)
 /// Byte 1:     flags (bit 0 = tiene DH pub)
 /// Bytes 2-9:  msg_number (u64 big-endian)
@@ -81,7 +81,13 @@ fn handshake_limiter() -> &'static Semaphore {
 /// ```
 fn encode_ratchet_frame(encrypted: crate::ratchet::EncryptedFrame) -> Vec<u8> {
     let mut frame = Vec::with_capacity(
-        1 + 1 + 8 + 8 + 12 + encrypted.dh_public_key.map(|_| 32).unwrap_or(0) + encrypted.ciphertext.len() + 16,
+        1 + 1
+            + 8
+            + 8
+            + 12
+            + encrypted.dh_public_key.map(|_| 32).unwrap_or(0)
+            + encrypted.ciphertext.len()
+            + 16,
     );
     let flags = if encrypted.dh_public_key.is_some() {
         FRAME_FLAG_DH_PUB
@@ -267,8 +273,7 @@ pub async fn connect_peer(
                             .with_time(std::time::Duration::from_secs(15))
                             .with_interval(std::time::Duration::from_secs(5)),
                     );
-                    tokio::net::TcpStream::from_std(std)
-                        .expect("from_std after keepalive")
+                    tokio::net::TcpStream::from_std(std).expect("from_std after keepalive")
                 }
                 Err(e) => {
                     session_mgr.system_msg(&format!("connect_peer: into_std failed: {e}"));
@@ -682,6 +687,11 @@ async fn run_peer_session(
                 match msg.flags {
                     FLAG_DUMMY => continue, // mensaje dummy, lo ignoramos
 
+                    FLAG_SYSTEM_ALONE => {
+                        let _ = session_mgr.message_tx.try_send((peer_id, msg));
+                        break;
+                    }
+
                     FLAG_PEER_LIST_REQ => {
                         // Nos piden nuestra lista de peers conectados
                         let addrs = session_mgr.list_peer_addresses(&peer_id);
@@ -764,10 +774,8 @@ async fn run_peer_session(
             }
 
             // ── Branch 4: cancelacion global (panic) ────────────────
-            changed = cancel_rx.changed() => {
-                if changed.is_err() || *cancel_rx.borrow() {
-                    break;
-                }
+            _ = cancel_rx.changed() => {
+                break;
             }
 
             // ── Branch 5: cancelacion local (disconnect_peer) ───────
@@ -787,7 +795,10 @@ async fn run_peer_session(
             timestamp: 0,
             flags: FLAG_SYSTEM_LEAVE,
         };
-        session_mgr.broadcast_except(&serde_json::to_vec(&leave_msg).unwrap_or_default(), &peer_id);
+        session_mgr.broadcast_except(
+            &serde_json::to_vec(&leave_msg).unwrap_or_default(),
+            &peer_id,
+        );
     }
 
     session_mgr.remove_session(&peer_id);
@@ -822,7 +833,10 @@ mod tests {
         assert_eq!(decoded.dh_epoch, 8);
         assert_eq!(decoded.ciphertext, vec![2, 3, 4, 5]);
         assert_eq!(decoded.tag, [6u8; 16]);
-        assert_eq!(decoded.dh_public_key.unwrap().as_bytes(), dh_public_key.as_bytes());
+        assert_eq!(
+            decoded.dh_public_key.unwrap().as_bytes(),
+            dh_public_key.as_bytes()
+        );
     }
 
     /// Verifica que decode rechaza frames con flags desconocidos.
@@ -857,5 +871,44 @@ mod tests {
         encoded[0] = FRAME_VERSION + 1; // version desconocida
 
         assert!(decode_ratchet_frame(&encoded).is_none());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::ratchet::EncryptedFrame;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn ratchet_frame_roundtrip_any(
+            nonce in any::<[u8; 12]>(),
+            msg_number in any::<u64>(),
+            dh_epoch in any::<u64>(),
+            ciphertext in proptest::collection::vec(any::<u8>(), 0..10000),
+            tag in any::<[u8; 16]>(),
+            dh_public_key_bytes in any::<Option<[u8; 32]>>(),
+        ) {
+            let dh_public_key = dh_public_key_bytes.map(PublicKey::from);
+            let encrypted = EncryptedFrame {
+                nonce,
+                msg_number,
+                dh_epoch,
+                ciphertext: ciphertext.clone(),
+                tag,
+                dh_public_key,
+            };
+
+            let encoded = encode_ratchet_frame(encrypted);
+            let decoded = decode_ratchet_frame(&encoded).expect("valid encoded ratchet frame");
+
+            prop_assert_eq!(decoded.nonce, nonce);
+            prop_assert_eq!(decoded.msg_number, msg_number);
+            prop_assert_eq!(decoded.dh_epoch, dh_epoch);
+            prop_assert_eq!(decoded.ciphertext, ciphertext);
+            prop_assert_eq!(decoded.tag, tag);
+            prop_assert_eq!(decoded.dh_public_key.map(|key| *key.as_bytes()), dh_public_key_bytes);
+        }
     }
 }
