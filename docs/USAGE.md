@@ -25,7 +25,7 @@ Flags:
 **Controles en la UI:**
 - `Enter` — enviar mensaje
 - `Esc` — salir (envía goodbye a peers conectados)
-- `F12` — pánico: regenera identidad, borra sesiones y known_peers (nuevo certificado TLS + nuevo PeerId)
+ - `F12` — pánico / cierre seguro completo del proceso: envía `FLAG_SYSTEM_ALONE` a peers, cancela tareas, limpia sesiones y known_peers, restaura la terminal y termina el proceso inmediatamente
 - `Re Pág` / `Av Pág` — desplazar historial
 - Escribir normalmente — ingresar texto
 
@@ -42,19 +42,19 @@ Envía un mensaje `GOODBYE` a todos los peers conectados, espera 200ms para que 
 - Si era el único peer (1:1 o 1→N) → también cierra la app automáticamente
 - Si hay más peers conectados (mesh) → solo muestra `[peer] disconnected` y sigue
 
-### `F12` — Pánico / Identity rotation
+### `F12` — Pánico / Cierre seguro completo del proceso
 
 **No envía goodbye.** En su lugar:
 1. Envía `FLAG_SYSTEM_ALONE` a todos los peers
-2. Genera un **nuevo certificado TLS** → nuevo PeerId
-3. Actualiza acceptor/connector con el nuevo certificado
-4. Borra todas las sesiones y `known_peers`
-5. El proceso sigue corriendo con identidad nueva
+2. Cancela todas las tareas Tokio (listener, reconexión, timeout, peers)
+3. Borra todas las sesiones y `known_peers`
+4. Restaura la terminal (sale de raw mode)
+5. **Termina el proceso inmediatamente** con `exit(0)`
 
 **Del otro lado:**
-- Los peers rotan también su identidad
-- `known_peers` se limpia del lado que hizo F12
-- Es como arrancar de cero: los demás te ven como un peer nuevo
+- Los peers reciben `FLAG_SYSTEM_ALONE` y limpian la sesión
+- No hay reconexión automática porque el proceso remoto ya no existe
+- Es un cierre de emergencia: el proceso local desaparece por completo
 
 ### Matar el proceso (kill, taskkill, Ctrl+Break)
 
@@ -73,6 +73,8 @@ sesame --phrase "secreto" --display-name "Sesame"
 # La próxima vez, el nombre persiste aunque no pases --display-name
 sesame --phrase "secreto"
 ```
+
+**Nota sobre errores de guardado:** si el sistema no puede escribir el archivo de config (por ejemplo, por falta de espacio en disco o permisos), el programa muestra un warning en la TUI pero sigue corriendo. El display name funciona para esa sesión, pero no persistirá hasta que se resuelva el problema.
 
 El nombre se envía a los peers cuando te conectás, y se muestra en:
 - **Lista de peers**: en vez de la IP
@@ -187,9 +189,9 @@ Usá la IP local (empieza con `192.168.`, `10.`, `172.16.`) — la que termina e
 | 2 personas, se cae 1 sin goodbye | El que quedó solo regenera identidad |
 | Se cae la red completa | Cada uno queda solo, regenera identidad. Hay que volver a conectar con `--peer` |
 | Peer cierra con `Esc` | Envía goodbye → los demás lo borran de known_peers y no reconectan. Si era 1:1, el receptor también cierra |
-| Peer cierra con `F12` | Identity rotation. Todos los peers rotan su identidad, known_peers se limpia |
+| Peer cierra con `F12` | Cierre completo del proceso. El peer local termina inmediatamente; los demás reciben `FLAG_SYSTEM_ALONE` y limpian la sesión |
 
-**Regenerar identidad** significa nuevo certificado TLS + nuevo PeerId. Es como arrancar de cero — otros peers te ven como alguien nuevo cuando te reconectás.
+**Cierre con F12** significa que el proceso local desaparece por completo. No hay reconexión automática porque el proceso ya no existe. Es un cierre de emergencia.
 
 ---
 

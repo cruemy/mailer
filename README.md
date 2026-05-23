@@ -30,17 +30,32 @@ All cryptographic material lives **in RAM only** — nothing is written to disk.
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.75+ (stable)
+- [Rust](https://rustup.rs/) 1.85+ (stable)
 
 ### Compile
 
 ```bash
-git clone https://github.com/cruemy/mailer.git
-cd mailer
+git clone https://github.com/cruemy/sesame.git
+cd sesame
 cargo build --release
 ```
 
 The binary will be at `target/release/sesame.exe` (Windows) or `target/release/sesame` (Linux/macOS).
+
+### Tests
+
+```bash
+cargo test
+```
+
+### Fuzzing
+
+```bash
+cargo install cargo-fuzz
+cargo fuzz run decode_ratchet_frame
+cargo fuzz run remove_padding
+cargo fuzz run padding_roundtrip
+```
 
 ### Run directly
 
@@ -102,7 +117,7 @@ See [USAGE.md](docs/USAGE.md) for detailed scenarios, CLI reference, and session
 |-----|--------|
 | `Enter` | Send message |
 | `Esc` | Clean exit — sends GOODBYE to peers, they stop reconnecting. On 1:1 / 1→N, receiver also closes |
-| `F12` | Panic — regenerates TLS identity, clears all sessions and known peers. Process stays running with new identity |
+| `F12` | Panic — sends `FLAG_SYSTEM_ALONE` to peers, cancels all tasks, clears sessions and known peers, restores terminal, and terminates the process immediately |
 | `Page Up` / `Page Down` | Scroll chat history |
 
 ## Display Name
@@ -112,6 +127,8 @@ Set a persistent visible name with `--display-name "Name"`. Stored in the platfo
 ```bash
 sesame --phrase "secret" --display-name "Alice"
 ```
+
+If saving the config fails (for example, due to disk space or permissions), a warning is shown in the TUI but the program continues running. The display name works for that session but will not persist until the issue is resolved.
 
 See [USAGE.md](docs/USAGE.md) for details.
 
