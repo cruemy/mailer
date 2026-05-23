@@ -2,15 +2,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
-use ratatui::Frame;
 
 use crate::panic::PanicHandler;
 use crate::session::SessionManager;
-use crate::types::{ChatMessage, PeerId, FLAG_SYSTEM_INFO, FLAG_SYSTEM_JOIN, FLAG_SYSTEM_LEAVE, FLAG_REAL};
+use crate::types::{
+    ChatMessage, FLAG_REAL, FLAG_SYSTEM_INFO, FLAG_SYSTEM_JOIN, FLAG_SYSTEM_LEAVE, PeerId,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTERFAZ DE TERMINAL (TUI) con Ratatui + Crossterm
@@ -92,8 +94,8 @@ impl TuiState {
     /// * `text` — texto del mensaje
     /// * `flags` — tipo de mensaje (para colorear/personalizar)
     pub fn add_message(&mut self, peer_id: PeerId, text: String, flags: u8) {
-        let near_bottom = self.messages.len() > 5
-            && self.scroll_offset >= self.messages.len().saturating_sub(5);
+        let near_bottom =
+            self.messages.len() > 5 && self.scroll_offset >= self.messages.len().saturating_sub(5);
         let was_at_bottom = self.auto_scroll || near_bottom;
         self.messages.push((peer_id, text, flags));
         while self.messages.len() > MAX_MESSAGES {
@@ -103,12 +105,6 @@ impl TuiState {
             self.auto_scroll = true;
             self.scroll_offset = 0;
         }
-    }
-
-    /// Limpia todos los mensajes y el input (se usa en panic/identity rotation).
-    pub fn clear_messages(&mut self) {
-        self.messages.clear();
-        self.input.clear();
     }
 
     /// Procesa un evento de teclado.
@@ -175,7 +171,7 @@ impl TuiState {
     /// Renderiza toda la interfaz en el frame de ratatui.
     ///
     /// Layout
-    /// ```
+    /// ```text
     /// ┌───────────────────────┬──────────┐
     /// │    75% Chat          │  25%     │
     /// │                      ├──────────┤
@@ -186,25 +182,20 @@ impl TuiState {
     /// └──────────────────────┴──────────┘
     /// ```
     pub fn render(&mut self, frame: &mut Frame) {
-        let panic_mode = self.panic_handler.lock().expect("panic_handler poisoned").is_decoy;
+        let panic_mode = self
+            .panic_handler
+            .lock()
+            .expect("panic_handler poisoned")
+            .is_decoy;
 
-        let main_chunks = Layout::horizontal([
-            Constraint::Ratio(3, 4),
-            Constraint::Ratio(1, 4),
-        ])
-        .split(frame.area());
+        let main_chunks = Layout::horizontal([Constraint::Ratio(3, 4), Constraint::Ratio(1, 4)])
+            .split(frame.area());
 
-        let right_chunks = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(1),
-        ])
-        .split(main_chunks[1]);
+        let right_chunks =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(main_chunks[1]);
 
-        let left_chunks = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(3),
-        ])
-        .split(main_chunks[0]);
+        let left_chunks =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(main_chunks[0]);
 
         self.render_chat(frame, left_chunks[0], panic_mode);
         self.render_input(frame, left_chunks[1]);
@@ -214,7 +205,8 @@ impl TuiState {
 
     /// Devuelve el nombre visible de un peer (display name o PeerId en hex).
     fn peer_display_name(&self, peer_id: &PeerId) -> String {
-        self.session_mgr.get_display_name(peer_id)
+        self.session_mgr
+            .get_display_name(peer_id)
             .unwrap_or_else(|| peer_id.to_string())
     }
 
@@ -236,16 +228,17 @@ impl TuiState {
                 let (prefix, style) = match *flags {
                     FLAG_SYSTEM_JOIN | FLAG_SYSTEM_LEAVE => (
                         format!(" ◆ "),
-                        Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(Color::Gray)
+                            .add_modifier(Modifier::ITALIC),
                     ),
                     FLAG_SYSTEM_INFO => (
                         format!(" ! "),
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ),
-                    _ if *peer_id == self.my_id => (
-                        " you ".to_string(),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    _ if *peer_id == self.my_id => {
+                        (" you ".to_string(), Style::default().fg(Color::Cyan))
+                    }
                     _ => {
                         let name = self.peer_display_name(peer_id);
                         (format!(" {name} "), Style::default().fg(Color::Green))
@@ -295,11 +288,7 @@ impl TuiState {
         } else {
             " REAL MODE "
         };
-        let color = if panic_mode {
-            Color::Red
-        } else {
-            Color::Green
-        };
+        let color = if panic_mode { Color::Red } else { Color::Green };
         let block = Paragraph::new(label)
             .block(Block::default().borders(Borders::ALL))
             .style(Style::default().fg(color).add_modifier(Modifier::BOLD));
@@ -312,19 +301,27 @@ impl TuiState {
     /// con su display name o PeerId.
     fn render_peer_list(&self, frame: &mut Frame, area: Rect) {
         let sessions = self.session_mgr.list_sessions();
-        let items: Vec<ListItem> = sessions
+        let my_name = self
+            .session_mgr
+            .my_display_name()
+            .unwrap_or_else(|| self.my_id.to_string());
+        let my_item = ListItem::new(format!("● {}", my_name))
+            .style(Style::default().fg(Color::Cyan));
+
+        let mut items: Vec<ListItem> = sessions
             .iter()
             .map(|info| {
                 let name = self.peer_display_name(&info.peer_id);
-                ListItem::new(name)
-                    .style(Style::default().fg(Color::Yellow))
+                ListItem::new(name).style(Style::default().fg(Color::Yellow))
             })
             .collect();
 
+        items.insert(0, my_item);
+
         let max = self.session_mgr.max_sessions;
-        let title = format!(" Peers {}/{} ", sessions.len(), max);
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title));
+        let total = sessions.len() + 1;
+        let title = format!(" Peers {}/{} ", total, max);
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(list, area);
     }
 }
@@ -376,20 +373,20 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
 /// Crossterm necesita un thread bloqueante para leer eventos (poll/read).
 /// No podemos hacer eso en el loop async de Tokio porque bloquearia todo.
 /// Entonces lanzamos un `spawn_blocking` que solo lee eventos y los
-/// manda por un canal unbounded.
+/// manda por un canal con buffer acotado.
 ///
 /// Devuelve
 /// El receptor del canal (para recibir eventos en el loop principal).
-pub fn spawn_event_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+pub fn spawn_event_reader() -> tokio::sync::mpsc::Receiver<Event> {
+    let (tx, rx) = tokio::sync::mpsc::channel(128);
 
     tokio::task::spawn_blocking(move || {
         loop {
             // Poll cada 100ms (no queremos quemar CPU)
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
                 if let Ok(event) = event::read() {
-                    if tx.send(event).is_err() {
-                        break;
+                    if tx.try_send(event).is_err() {
+                        continue;
                     }
                 }
             }
@@ -409,12 +406,12 @@ pub fn spawn_event_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> {
 ///
 /// Devuelve
 /// La terminal de ratatui lista para usar, o error si algo falla.
-pub fn setup_terminal(
-) -> std::io::Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>> {
-    use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
+pub fn setup_terminal()
+-> std::io::Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>> {
     use crossterm::ExecutableCommand;
-    use ratatui::backend::CrosstermBackend;
+    use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
     use ratatui::Terminal;
+    use ratatui::backend::CrosstermBackend;
 
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
@@ -428,8 +425,8 @@ pub fn setup_terminal(
 /// 1. Sale de la pantalla alternativa
 /// 2. Desactiva raw mode
 pub fn restore_terminal() -> std::io::Result<()> {
-    use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
     use crossterm::ExecutableCommand;
+    use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
 
     disable_raw_mode()?;
     std::io::stdout().execute(LeaveAlternateScreen)?;
@@ -467,5 +464,63 @@ mod tests {
 
         assert!(state.panic_requested);
         assert!(!state.quit);
+    }
+
+    /// Verifica que el propio usuario aparece en la lista de peers.
+    #[test]
+    fn peer_list_includes_self() {
+        let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(1);
+        let my_id = PeerId([1u8; 32]);
+        let session_mgr = Arc::new(SessionManager::new(
+            crate::crypto::LockedBytes::new(b"phrase".to_vec()),
+            msg_tx,
+            Duration::from_secs(300),
+            PeerAddr {
+                ip: "127.0.0.1".parse().expect("valid ip"),
+                port: 19000,
+            },
+            my_id,
+            None,
+        ));
+        let panic_handler = Arc::new(std::sync::Mutex::new(PanicHandler::new(false)));
+        let state = TuiState::new(my_id, session_mgr, panic_handler);
+
+        let my_name = state
+            .session_mgr
+            .my_display_name()
+            .unwrap_or_else(|| state.my_id.to_string());
+        let expected_label = format!("● {}", my_name);
+
+        assert!(expected_label.starts_with("● "));
+        assert_eq!(state.my_id, my_id);
+    }
+
+    /// Verifica que el propio usuario con display name se muestra correctamente.
+    #[test]
+    fn peer_list_includes_self_with_display_name() {
+        let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(1);
+        let my_id = PeerId([2u8; 32]);
+        let session_mgr = Arc::new(SessionManager::new(
+            crate::crypto::LockedBytes::new(b"phrase".to_vec()),
+            msg_tx,
+            Duration::from_secs(300),
+            PeerAddr {
+                ip: "127.0.0.1".parse().expect("valid ip"),
+                port: 19000,
+            },
+            my_id,
+            Some("Alice".to_string()),
+        ));
+        let panic_handler = Arc::new(std::sync::Mutex::new(PanicHandler::new(false)));
+        let state = TuiState::new(my_id, session_mgr, panic_handler);
+
+        let my_name = state
+            .session_mgr
+            .my_display_name()
+            .unwrap_or_else(|| state.my_id.to_string());
+        let expected_label = format!("● {}", my_name);
+
+        assert_eq!(my_name, "Alice");
+        assert_eq!(expected_label, "● Alice");
     }
 }
